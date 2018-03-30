@@ -365,7 +365,7 @@ class Backend
   // BASE has a pointer type.  This is used for slice indexing.
   virtual Bexpression*
   pointer_offset_expression(Bexpression* base, Bexpression* index,
-                            Location) = 0;
+                            Bexpression* sizeofelement, Location) = 0;
 
   // Return an expression for ARRAY[INDEX] as an l-value.  ARRAY is a valid
   // fixed-length array, not a slice.

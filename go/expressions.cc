@@ -11399,7 +11399,7 @@ Array_index_expression::do_get_backend(Translate_context* context)
               array_type->get_value_pointer(gogo, this->array_,
                                             this->is_lvalue_);
 	  Bexpression* ptr = valptr->get_backend(context);
-          ptr = gogo->backend()->pointer_offset_expression(ptr, start, loc);
+          ptr = gogo->backend()->pointer_offset_expression(ptr, start, NULL, loc);
 
 	  Type* ele_type = this->array_->type()->array_type()->element_type();
 	  Btype* ele_btype = ele_type->get_backend(gogo);
@@ -11482,7 +11482,7 @@ Array_index_expression::do_get_backend(Translate_context* context)
   Expression* valptr = array_type->get_value_pointer(gogo, this->array_,
                                                      this->is_lvalue_);
   Bexpression* val = valptr->get_backend(context);
-  val = gogo->backend()->pointer_offset_expression(val, offset, loc);
+  val = gogo->backend()->pointer_offset_expression(val, offset, NULL, loc);
 
   Btype* struct_btype = this->type()->get_backend(gogo);
   std::vector<Bexpression*> init;
@@ -11725,7 +11725,7 @@ String_index_expression::do_get_backend(Translate_context* context)
 
       Bexpression* bstart = start->get_backend(context);
       Bexpression* ptr = bytes->get_backend(context);
-      ptr = gogo->backend()->pointer_offset_expression(ptr, bstart, loc);
+      ptr = gogo->backend()->pointer_offset_expression(ptr, bstart, NULL, loc);
       Btype* ubtype = Type::lookup_integer_type("uint8")->get_backend(gogo);
       Bexpression* index =
 	gogo->backend()->indirect_expression(ubtype, ptr, true, loc);
