@@ -20,6 +20,8 @@
 #include "backend.h"
 #include "types.h"
 
+
+
 // Forward declarations so that we don't have to make types.h #include
 // backend.h.
 
@@ -46,6 +48,88 @@ Type::Type(Type_classification classification)
 
 Type::~Type()
 {
+}
+
+Type*
+Type::dispatch_substitute(Type* wildcard, std::map<Named_type*, Named_type*> saw)
+{
+  switch (this->classification_)
+    {
+    case TYPE_SINK:
+      go_unreachable();
+    default:
+      return this->substitute(wildcard, saw);
+    }
+}
+
+Type*
+Type::dispatch_wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+
+  //	printf("## Deriving wildcard %p %p %d %d\n", this, a, this->classification_, a->classification_);
+
+  switch (this->classification_)
+    {
+    case TYPE_SINK:
+      go_unreachable();
+    default:
+      return this->wildcard(a, saw);
+    }
+}
+
+bool
+Type::dispatch_same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+
+  //	printf("## Checking same %p %p %d %d\n", this, a, this->classification_, a->classification_);
+
+  switch (this->classification_)
+    {
+    case TYPE_SINK:
+      go_unreachable();
+    default:
+      return this->same(a, saw);
+    }
+}
+
+
+Type*
+Type::check_typeconflict(Type* newt, Type* oldt, bool vararg_eface_promotion)
+{
+  if (newt == NULL) {
+    return oldt;
+  }
+  if (oldt == NULL) {
+    return newt;
+  }
+  if (newt->is_nil_type()) {
+    return oldt;
+  }
+  if (oldt->is_nil_type()) {
+    return newt;
+  }
+
+  //	printf("Type::check_typeconflict MUST BE SAME %p %p\n", oldt, newt);
+
+  std::map<Named_type*, Named_type*> saw;
+  if (newt->same(oldt, saw)) {
+    saw.clear();
+    return oldt;
+  }
+  saw.clear();
+
+  if (vararg_eface_promotion) {
+    Interface_type* t = oldt->interface_type();
+    if ((t != NULL) && (t->method_count() == 0)) {
+      if (Type::are_assignable(newt, oldt, NULL)) {
+        return oldt;
+      }
+    }
+  }
+
+  //	printf("NOT IDENTICAL %p %p \n", newt, oldt);
+
+  return Type::make_error_type();
 }
 
 // Get the base type for a type--skip names and forward declarations.
@@ -385,8 +469,11 @@ Type::are_identical(const Type* t1, const Type* t2, int flags,
     }
 
   // A named type is only identical to itself.
-  if (t1->named_type() != NULL || t2->named_type() != NULL)
+  if (t1->named_type() != NULL || t2->named_type() != NULL) {
+    if (reason != NULL)
+      *reason = "named only to self";
     return false;
+  }
 
   // Check type shapes.
   if (t1->classification() != t2->classification())
@@ -1334,7 +1421,7 @@ Type::make_type_descriptor_var(Gogo* gogo)
   // The type descriptor symbol for the unsafe.Pointer type is defined in
   // libgo/go-unsafe-pointer.c, so we just return a reference to that
   // symbol if necessary.
-  if (this->is_unsafe_pointer_type())
+  if (this->is_unsafe_pointer_type() || this->is_void_type())
     {
       Location bloc = Linemap::predeclared_location();
 
@@ -1342,10 +1429,15 @@ Type::make_type_descriptor_var(Gogo* gogo)
       Btype* td_btype = td_type->get_backend(gogo);
       std::string name = gogo->type_descriptor_name(this, nt);
       std::string asm_name(go_selectively_encode_id(name));
+
+
+      if (this->is_void_type())
+        name = "unsafe.Pointer..d";
+
       this->type_descriptor_var_ =
-	  gogo->backend()->immutable_struct_reference(name, asm_name,
-						      td_btype,
-						      bloc);
+        gogo->backend()->immutable_struct_reference(name, asm_name,
+                                                    td_btype,
+                                                    bloc);
 
       if (phash != NULL)
 	*phash = this->type_descriptor_var_;
@@ -1398,9 +1490,20 @@ Type::make_type_descriptor_var(Gogo* gogo)
   // converting INITIALIZER.
 
   std::string asm_name(go_selectively_encode_id(var_name));
-  this->type_descriptor_var_ =
+  if (this->is_void_type()) {
+
+    Type* td_type = Type::make_type_descriptor_type();
+    Btype* td_btype = td_type->get_backend(gogo);
+
+    this->type_descriptor_var_ =
+      gogo->backend()->immutable_struct_reference(var_name, asm_name,
+                                                  td_btype,
+                                                  loc);
+  } else {
+    this->type_descriptor_var_ =
       gogo->backend()->immutable_struct(var_name, asm_name, false, is_common,
-				      initializer_btype, loc);
+                                        initializer_btype, loc);
+  }
   if (phash != NULL)
     *phash = this->type_descriptor_var_;
 
@@ -1544,7 +1647,7 @@ Type::make_type_descriptor_type()
       // should use the named version instead, although that would
       // require us to create the unsafe package if it has not been
       // imported.  It probably doesn't matter.
-      Type* void_type = Type::make_void_type();
+      Type* void_type = Type::make_void_type(NULL, NULL);
       Type* unsafe_pointer_type = Type::make_pointer_type(void_type);
 
       Typed_identifier_list *params = new Typed_identifier_list();
@@ -1749,7 +1852,7 @@ Type::type_functions(Gogo* gogo, Named_type* name, Function_type* hash_fntype,
       Location bloc = Linemap::predeclared_location();
 
       Type* uintptr_type = Type::lookup_integer_type("uintptr");
-      Type* void_type = Type::make_void_type();
+      Type* void_type = Type::make_void_type(NULL, NULL);
       Type* unsafe_pointer_type = Type::make_pointer_type(void_type);
 
       if (hash_fntype == NULL)
@@ -2120,7 +2223,7 @@ Type::write_identity_hash(Gogo* gogo, int64_t size)
 {
   Location bloc = Linemap::predeclared_location();
 
-  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   Type* uintptr_type = Type::lookup_integer_type("uintptr");
 
   Typed_identifier_list* params = new Typed_identifier_list();
@@ -2173,7 +2276,7 @@ Type::write_identity_equal(Gogo* gogo, int64_t size)
 {
   Location bloc = Linemap::predeclared_location();
 
-  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   Type* uintptr_type = Type::lookup_integer_type("uintptr");
 
   Typed_identifier_list* params = new Typed_identifier_list();
@@ -2578,7 +2681,7 @@ Type::make_gc_symbol_var(Gogo* gogo)
 bool
 Type::needs_gcprog(Gogo* gogo, int64_t* ptrsize, int64_t* ptrdata)
 {
-  Type* voidptr = Type::make_pointer_type(Type::make_void_type());
+  Type* voidptr = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   if (!voidptr->backend_type_size(gogo, ptrsize))
     go_unreachable();
 
@@ -3808,6 +3911,24 @@ Type::make_error_type()
   return &singleton_error_type;
 }
 
+Type*
+Error_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  return this;
+}
+
+Type*
+Error_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return this;
+}
+
+bool
+Error_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return false;
+}
+
 // Class Void_type.
 
 // Get the backend representation of a void type.
@@ -3819,10 +3940,54 @@ Void_type::do_get_backend(Gogo* gogo)
 }
 
 Type*
-Type::make_void_type()
+Type::make_void_type(Named_object* sizeofgeneric, Named_object*** result)
 {
-  static Void_type singleton_void_type;
-  return &singleton_void_type;
+  Void_type* void_type = new Void_type(sizeofgeneric);
+
+  //      printf("make_void_type %p\n", void_type);
+  //	print_trace();
+
+  if (result != NULL)
+    *result = void_type->get();
+
+  return void_type;
+}
+
+
+// Make the type descriptor.
+
+Expression*
+Void_type::do_type_descriptor(Gogo* gogo, Named_type* name)
+{
+  Named_object* sizeofg = this->sizeofgeneric_;
+  if (sizeofg != NULL) {
+    return Expression::make_var_reference(sizeofg, Linemap::predeclared_location());
+  }
+  //        printf("THE SIZEOFLESS VOID IS %p\n", this);
+  go_unreachable();
+  return NULL;
+}
+
+Type*
+Void_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  return wildcard_type;
+}
+
+Type*
+Void_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return a;
+}
+
+bool
+Void_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  bool ret = a->void_type() != NULL;
+  //	if (ret)
+  //	printf("!= null so other is also void");
+
+  return ret;
 }
 
 // Class Boolean_type.
@@ -3881,6 +4046,24 @@ Type::make_named_bool_type()
   Named_type* named_type = named_object->type_value();
   named_bool_type = named_type;
   return named_type;
+}
+
+Type*
+Boolean_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  return this;
+}
+
+Type*
+Boolean_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return NULL;
+}
+
+bool
+Boolean_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
 }
 
 // Class Integer_type.
@@ -4034,6 +4217,24 @@ Type::lookup_integer_type(const char* name)
   return Integer_type::lookup_integer_type(name);
 }
 
+Type*
+Integer_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  return this;
+}
+
+Type*
+Integer_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return NULL;
+}
+
+bool
+Integer_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return a->classification() == TYPE_INTEGER;
+}
+
 // Class Float_type.
 
 Float_type::Named_float_types Float_type::named_float_types;
@@ -4144,6 +4345,24 @@ Named_type*
 Type::lookup_float_type(const char* name)
 {
   return Float_type::lookup_float_type(name);
+}
+
+Type*
+Float_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  return this;
+}
+
+Type*
+Float_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return NULL;
+}
+
+bool
+Float_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
 }
 
 // Class Complex_type.
@@ -4261,6 +4480,24 @@ Type::lookup_complex_type(const char* name)
   return Complex_type::lookup_complex_type(name);
 }
 
+Type*
+Complex_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  return this;
+}
+
+Type*
+Complex_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return NULL;
+}
+
+bool
+Complex_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
 // Class String_type.
 
 // Convert String_type to the backend representation.  A string is a
@@ -4357,6 +4594,24 @@ Type::make_named_string_type()
   return named_type;
 }
 
+Type*
+String_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  return this;
+}
+
+Type*
+String_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return NULL;
+}
+
+bool
+String_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return a->is_sink_type();
+}
+
 // The sink type.  This is the type of the blank identifier _.  Any
 // type may be assigned to it.
 
@@ -4366,6 +4621,15 @@ class Sink_type : public Type
   Sink_type()
     : Type(TYPE_SINK)
   { }
+
+  Type*
+  substitute(Type* wildcard, std::map<Named_type*, Named_type*> saw);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   bool
@@ -4396,6 +4660,24 @@ Type::make_sink_type()
 {
   static Sink_type sink_type;
   return &sink_type;
+}
+
+Type*
+Sink_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
+Type*
+Sink_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
+bool
+Sink_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
 }
 
 // Class Function_type.
@@ -5234,6 +5516,138 @@ Type::make_backend_function_type(Typed_identifier* receiver,
   return new Backend_function_type(receiver, parameters, results, location);
 }
 
+Type*
+Function_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  bool differs = false;
+
+
+  const Typed_identifier_list* params = this->parameters();
+
+  Typed_identifier_list* myparams = new Typed_identifier_list();
+
+  for (size_t i = 0; i < params->size(); i++) {
+    const Typed_identifier& f = params->at(i);
+    Type* p = f.type();
+
+    Type* sub = p->dispatch_substitute(wildcard_type, saw);
+    if (sub == p) {
+      myparams->push_back(f);
+
+    } else {
+      const Typed_identifier& t = Typed_identifier(f.name(), sub,
+                                                   this->location());
+      myparams->push_back(t);
+      differs = true;
+    }
+
+
+  }
+
+
+  const Typed_identifier_list* results = this->results();
+
+  Typed_identifier_list* myresults = new Typed_identifier_list();
+
+  for (size_t i = 0; i < results->size(); i++) {
+    const Typed_identifier& f = results->at(i);
+    Type* p = f.type();
+
+    Type* sub = p->dispatch_substitute(wildcard_type, saw);
+    if (sub == p) {
+      myresults->push_back(f);
+
+    } else {
+      const Typed_identifier& t = Typed_identifier(f.name(), sub,
+                                                   this->location());
+      myresults->push_back(t);
+      differs = true;
+    }
+
+
+  }
+
+
+  if (!differs) {
+    delete myparams;
+    delete myresults;
+    return this;
+  }
+
+  return Type::make_function_type((Typed_identifier*)this->receiver(), myparams,
+				  myresults, this->location());
+}
+
+Type*
+Function_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Function_type* x = a->function_type();
+  if (x == NULL) {
+    return NULL;
+  }
+
+  if (x->is_nil_type()) {
+    std::map<Named_type*, Named_type*> seen;
+    if (this->wildcard(this, seen)->is_void_type()) {
+      seen.clear();
+      return x;
+    }
+    seen.clear();
+  }
+  Type* wildcard = NULL;
+  if ((this->parameters() != NULL) && (x->parameters() != NULL)) {
+
+
+
+    int i = 0;
+    Typed_identifier_list::const_iterator p = x->parameters()->begin();
+    for (Typed_identifier_list::const_iterator q = this->parameters()->begin();
+         q != this->parameters()->end() && p != x->parameters()->end();
+         ++q, ++p, ++i)
+      {
+
+        if ((q)->type()->is_void_type()) {
+          continue;
+        }
+
+        Type* wc = (q)->type()->dispatch_wildcard((p)->type(), saw);
+        wildcard = check_typeconflict(wc, wildcard, false);
+
+      }
+  }
+
+  if ((this->results() != NULL) && (x->results() != NULL)) {
+
+
+
+
+    int i = 0;
+    Typed_identifier_list::const_iterator p = x->results()->begin();
+    for (Typed_identifier_list::const_iterator q = this->results()->begin();
+         q != this->results()->end() && p != x->results()->end();
+         ++q, ++p, ++i)
+      {
+
+        if ((q)->type()->is_void_type()) {
+          continue;
+        }
+
+        Type* wc = (q)->type()->dispatch_wildcard((p)->type(), saw);
+        wildcard = check_typeconflict(wc, wildcard, false);
+
+      }
+  }
+
+
+  return wildcard;
+}
+
+bool
+Function_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
 // Class Pointer_type.
 
 // Traversal.
@@ -5358,10 +5772,55 @@ Pointer_type::do_import(Import* imp)
   if (imp->match_c_string("any"))
     {
       imp->advance(3);
-      return Type::make_pointer_type(Type::make_void_type());
+      return Type::make_pointer_type(Type::make_void_type(NULL, NULL));
     }
   Type* to = imp->read_type();
   return Type::make_pointer_type(to);
+}
+
+Type*
+Pointer_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  Type* ret = this->points_to()->dispatch_substitute(wildcard_type, saw);
+  if (ret == this->points_to()) {
+    return this;
+  }
+  if (ret == NULL) {
+    return NULL;
+  }
+  return Type::inval(ret, Type::make_pointer_type(ret));
+}
+
+Type*
+Pointer_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Pointer_type* x = a->pointer_type();
+  if (x == NULL) {
+    return NULL;
+  }
+
+  if (x->is_nil_type()) {
+    std::map<Named_type*, Named_type*> seen;
+    if (this->wildcard(this, seen)->is_void_type()) {
+      seen.clear();
+      return x;
+    }
+    seen.clear();
+  }
+
+  return this->points_to()->dispatch_wildcard(x->points_to(), saw);
+}
+
+bool
+Pointer_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Pointer_type* x = a->pointer_type();
+  if (x == NULL) {
+    return false;
+  }
+
+
+  return this->points_to()->dispatch_same(x->points_to(), saw);
 }
 
 // Cache of pointer types. Key is "to" type, value is pointer type
@@ -5438,6 +5897,48 @@ Type::make_nil_type()
   return &singleton_nil_type;
 }
 
+Type*
+Nil_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
+Type*
+Nil_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
+bool
+Nil_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  if (a->pointer_type() != NULL) {
+    return true;
+  }
+  if (a->string_type() != NULL) {
+    return true;
+  }
+  if (a->function_type() != NULL) {
+    return true;
+  }
+  if (a->nil_type() != NULL) {
+    return true;
+  }
+  if (a->array_type() != NULL) {
+    return true;
+  }
+  if (a->map_type() != NULL) {
+    return true;
+  }
+  if (a->channel_type() != NULL) {
+    return true;
+  }
+  if (a->interface_type() != NULL) {
+    return true;
+  }
+  return false;
+}
+
 // The type of a function call which returns multiple values.  This is
 // really a struct, but we don't want to confuse a function call which
 // returns a struct with a function call which returns multiple
@@ -5448,8 +5949,16 @@ class Call_multiple_result_type : public Type
  public:
   Call_multiple_result_type(Call_expression* call)
     : Type(TYPE_CALL_MULTIPLE_RESULT),
-      call_(call)
+      call_(call), wildcard_(NULL)
   { }
+
+  Type*
+  substitute(Type* wildcard, std::map<Named_type*, Named_type*> saw);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   bool
@@ -5461,18 +5970,10 @@ class Call_multiple_result_type : public Type
   { return false; }
 
   Btype*
-  do_get_backend(Gogo* gogo)
-  {
-    go_assert(saw_errors());
-    return gogo->backend()->error_type();
-  }
+  do_get_backend(Gogo* gogo);
 
   Expression*
-  do_type_descriptor(Gogo*, Named_type*)
-  {
-    go_assert(saw_errors());
-    return Expression::make_error(Linemap::unknown_location());
-  }
+  do_type_descriptor(Gogo*, Named_type*);
 
   void
   do_reflection(Gogo*, std::string*) const
@@ -5485,6 +5986,8 @@ class Call_multiple_result_type : public Type
  private:
   // The expression being called.
   Call_expression* call_;
+  // The wildcard type cascaded to parent call.
+  Type* wildcard_;
 };
 
 // Make a call result type.
@@ -5493,6 +5996,39 @@ Type*
 Type::make_call_multiple_result_type(Call_expression* call)
 {
   return new Call_multiple_result_type(call);
+}
+
+Type*
+Call_multiple_result_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  this->wildcard_ = wildcard_type;
+  return this;
+}
+
+Type*
+Call_multiple_result_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return this->wildcard_;
+}
+
+bool
+Call_multiple_result_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
+Btype*
+Call_multiple_result_type::do_get_backend(Gogo* gogo)
+{
+  go_assert(saw_errors());
+  return gogo->backend()->error_type();
+}
+
+  Expression*
+Call_multiple_result_type::do_type_descriptor(Gogo*, Named_type*)
+{
+  go_assert(saw_errors());
+  return Expression::make_error(Linemap::unknown_location());
 }
 
 // Class Struct_field.
@@ -6417,7 +6953,7 @@ Struct_type::write_hash_function(Gogo* gogo, Named_type*,
       Temporary_reference_expression* tref =
 	Expression::make_temporary_reference(retval, bloc);
       tref->set_is_lvalue();
-      Statement* s = Statement::make_assignment(tref, call, bloc);
+      Statement* s = Statement::make_assignment(tref, call, gogo->lookup("Sizeofgeneric", NULL),  bloc);
       gogo->add_statement(s);
     }
 
@@ -6944,6 +7480,93 @@ Type::make_struct_type(Struct_field_list* fields,
   return new Struct_type(fields, location);
 }
 
+Type*
+Struct_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  size_t tcnt = this->field_count();
+
+  bool differs = false;
+  Struct_field_list* fields = new Struct_field_list();
+
+  for (size_t i = 0; i < tcnt; i++) {
+    const Struct_field& f = *(this->field((unsigned int)i));
+    Type* p = f.type();
+
+    Type* sub = p->dispatch_substitute(wildcard_type, saw);
+    if (sub == p) {
+      fields->push_back(f);
+
+    } else {
+      const Typed_identifier& t = Typed_identifier(f.field_name(), sub,
+                                                   this->location());
+      fields->push_back(Struct_field(t));
+      differs = true;
+    }
+
+
+  }
+  if (!differs) {
+    delete fields;
+    return this;
+  }
+
+  return Type::make_struct_type(fields, this->location());
+}
+
+Type*
+Struct_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Struct_type* x = a->struct_type();
+  if (x == NULL) {
+    return NULL;
+  }
+
+  size_t xcnt = x->field_count();
+  size_t tcnt = this->field_count();
+
+  if (xcnt != tcnt) {
+    return NULL;
+  }
+
+  Type* wildcard = NULL;
+
+  for (size_t i = 0; i < xcnt; i++) {
+    Type* p = this->field((unsigned int)i)->type();
+    Type* q = x->field((unsigned int)i)->type();
+
+    Type* wc = p->dispatch_wildcard(q, saw);
+    wildcard = check_typeconflict(wc, wildcard, false);
+  }
+  return wildcard;
+}
+
+bool
+Struct_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Struct_type* x = a->struct_type();
+  if (x == NULL) {
+    return false;
+  }
+
+  size_t xcnt = x->field_count();
+  size_t tcnt = this->field_count();
+
+  if (xcnt != tcnt) {
+    return false;
+  }
+
+  for (size_t i = 0; i < xcnt; i++) {
+    Type* p = this->field((unsigned int)i)->type();
+    Type* q = x->field((unsigned int)i)->type();
+
+    bool wc = p->dispatch_same(q, saw);
+    if (!wc) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Class Array_type.
 
 // Store the length of an array as an int64_t into *PLEN.  Return
@@ -7269,7 +7892,7 @@ Array_type::write_hash_function(Gogo* gogo, Named_type* name,
   Temporary_reference_expression* tref =
     Expression::make_temporary_reference(retval, bloc);
   tref->set_is_lvalue();
-  Statement* s = Statement::make_assignment(tref, call, bloc);
+  Statement* s = Statement::make_assignment(tref, call, gogo->lookup("Sizeofgeneric", NULL),  bloc);
   gogo->add_statement(s);
 
   // Increase the element pointer.
@@ -7333,16 +7956,19 @@ Array_type::write_equal_function(Gogo* gogo, Named_type* name)
 
   gogo->start_block(bloc);
 
+  // This fucntion is a tough nut.
+  Named_object* sizeofg = gogo->lookup("Sizeofgeneric", NULL);
+
   // Compare element in P1 and P2.
   Expression* e1 = Expression::make_temporary_reference(p1, bloc);
   e1 = Expression::make_dereference(e1, Expression::NIL_CHECK_DEFAULT, bloc);
   ref = Expression::make_temporary_reference(index, bloc);
-  e1 = Expression::make_array_index(e1, ref, NULL, NULL, bloc);
+  e1 = Expression::make_array_index(e1, ref, NULL, NULL, sizeofg, bloc);
 
   Expression* e2 = Expression::make_temporary_reference(p2, bloc);
   e2 = Expression::make_dereference(e2, Expression::NIL_CHECK_DEFAULT, bloc);
   ref = Expression::make_temporary_reference(index, bloc);
-  e2 = Expression::make_array_index(e2, ref, NULL, NULL, bloc);
+  e2 = Expression::make_array_index(e2, ref, NULL, NULL, sizeofg, bloc);
 
   Expression* cond = Expression::make_binary(OPERATOR_NOTEQ, e1, e2, bloc);
 
@@ -7594,7 +8220,11 @@ Array_type::do_export(Export* exp) const
       mpz_clear(val);
     }
   exp->write_c_string("] ");
-  exp->write_type(this->element_type_);
+
+  if (this->element_type()->is_void_type())
+    exp->write_c_string("any");
+  else
+    exp->write_type(this->element_type_);
 }
 
 // Import.
@@ -7609,6 +8239,12 @@ Array_type::do_import(Import* imp)
   else
     length = Expression::import_expression(imp, imp->location());
   imp->require_c_string("] ");
+  if (imp->match_c_string("any"))
+    {
+      imp->advance(3);
+      return Type::make_array_type(Type::make_void_type(NULL, NULL), length);
+    }
+
   Type* element_type = imp->read_type();
   return Type::make_array_type(element_type, length);
 }
@@ -7779,6 +8415,52 @@ Type::make_array_type(Type* element_type, Expression* length)
   return new Array_type(element_type, length);
 }
 
+Type*
+Array_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  Type* sub = this->element_type_->dispatch_substitute(wildcard_type, saw);
+  if (sub == this->element_type_) {
+    return this;
+  }
+  return Type::inval(sub, new Array_type(sub, this->length_));
+}
+
+Type*
+Array_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Array_type* x = a->array_type();
+  if (x == NULL) {
+    return NULL;
+  }
+
+  if ((x->length() == NULL) != (this->length() == NULL)) {
+    return Type::make_error_type();
+  }
+
+  if ((x->length() == NULL) && x->is_nil_type()) {
+    std::map<Named_type*, Named_type*> seen;
+    if (this->wildcard(this, seen)->is_void_type()) {
+      seen.clear();
+      return x;
+    }
+    seen.clear();
+  }
+
+  return this->element_type()->dispatch_wildcard(x->element_type(), saw);
+}
+
+bool
+Array_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Array_type* x = a->array_type();
+  if (x == NULL) {
+    return false;
+  }
+
+
+  return this->element_type()->dispatch_same(x->element_type(), saw);
+}
+
 // Class Map_type.
 
 Named_object* Map_type::zero_value;
@@ -7832,7 +8514,7 @@ Map_type::fat_zero_value(Gogo* gogo)
 
   Expression* z = Expression::make_var_reference(Map_type::zero_value, bloc);
   z = Expression::make_unary(OPERATOR_AND, z, bloc);
-  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   z = Expression::make_cast(unsafe_ptr_type, z, bloc);
   return z;
 }
@@ -8175,7 +8857,7 @@ Map_type::bucket_type(Gogo* gogo, int64_t keysize, int64_t valsize)
       // give it a way to refer to itself.  Since nothing really cares
       // (except perhaps for someone using a debugger) just use an
       // unsafe pointer.
-      overflow_type = Type::make_pointer_type(Type::make_void_type());
+      overflow_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
     }
 
   // Make sure the overflow pointer is the last memory in the struct,
@@ -8283,7 +8965,7 @@ Map_type::hmap_type(Type* bucket_type)
   Type* uint16_type = Type::lookup_integer_type("uint16");
   Type* uint32_type = Type::lookup_integer_type("uint32");
   Type* uintptr_type = Type::lookup_integer_type("uintptr");
-  Type* void_ptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* void_ptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
 
   Type* ptr_bucket_type = Type::make_pointer_type(bucket_type);
 
@@ -8328,7 +9010,7 @@ Map_type::hiter_type(Gogo* gogo)
   Type* bucket_ptr_type = Type::make_pointer_type(bucket_type);
   Type* hmap_type = this->hmap_type(bucket_type);
   Type* hmap_ptr_type = Type::make_pointer_type(hmap_type);
-  Type* void_ptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* void_ptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   Type* bool_type = Type::lookup_bool_type();
 
   Struct_type* ret = make_builtin_struct_type(15,
@@ -8392,6 +9074,46 @@ Map_type*
 Type::make_map_type(Type* key_type, Type* val_type, Location location)
 {
   return new Map_type(key_type, val_type, location);
+}
+
+Type*
+Map_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
+Type*
+Map_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Map_type* x = a->map_type();
+  if (x == NULL) {
+    return NULL;
+  }
+
+  if (x->is_nil_type()) {
+    std::map<Named_type*, Named_type*> seen;
+    if (this->wildcard(this, seen)->is_void_type()) {
+      seen.clear();
+      return x;
+    }
+    seen.clear();
+  }
+
+  Type* tk = this->key_type();
+  Type* tv = this->val_type();
+
+  Type* xk = x->key_type();
+  Type* xv = x->val_type();
+
+  Type* kwc = tk->dispatch_wildcard(xk, saw);
+  Type* vwc = tv->dispatch_wildcard(xv, saw);
+
+  return check_typeconflict(vwc, kwc, false);
+}
+bool
+Map_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
 }
 
 // Class Channel_type.
@@ -8590,7 +9312,7 @@ Channel_type::select_case_type()
   if (scase_type == NULL)
     {
       Type* unsafe_pointer_type =
-	Type::make_pointer_type(Type::make_void_type());
+	Type::make_pointer_type(Type::make_void_type(NULL, NULL));
       Type* uint16_type = Type::lookup_integer_type("uint16");
       Type* int64_type = Type::lookup_integer_type("int64");
       scase_type =
@@ -8611,6 +9333,43 @@ Type::make_channel_type(bool send, bool receive, Type* element_type)
 {
   return new Channel_type(send, receive, element_type);
 }
+
+Type*
+Channel_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  Type* e = this->element_type()->dispatch_substitute(wildcard_type, saw);
+  if (e == this->element_type()) {
+    return this;
+  }
+  return make_channel_type(this->may_send(), this->may_receive(), e);
+}
+
+Type*
+Channel_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Channel_type* x = a->channel_type();
+  if (x == NULL) {
+    return NULL;
+  }
+
+  if (x->is_nil_type()) {
+    std::map<Named_type*, Named_type*> seen;
+    if (this->wildcard(this, seen)->is_void_type()) {
+      seen.clear();
+      return x;
+    }
+    seen.clear();
+  }
+
+  return this->element_type()->dispatch_wildcard(x->element_type(), saw);
+}
+
+bool
+Channel_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
 
 // Class Interface_type.
 
@@ -9116,7 +9875,7 @@ Interface_type::get_backend_empty_interface_type(Gogo* gogo)
       bfields[0].btype = pdt->get_backend(gogo);
       bfields[0].location = bloc;
 
-      Type* vt = Type::make_pointer_type(Type::make_void_type());
+      Type* vt = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
       bfields[1].name = "__object";
       bfields[1].btype = vt->get_backend(gogo);
       bfields[1].location = bloc;
@@ -9178,7 +9937,7 @@ Interface_type::get_backend_methods(Gogo* gogo)
       Typed_identifier_list* mparams = new Typed_identifier_list();
       if (params != NULL)
 	mparams->reserve(params->size() + 1);
-      Type* vt = Type::make_pointer_type(Type::make_void_type());
+      Type* vt = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
       mparams->push_back(Typed_identifier("", vt, ft->location()));
       if (params != NULL)
 	{
@@ -9267,7 +10026,7 @@ get_backend_interface_fields(Gogo* gogo, Interface_type* type,
 			 : type->get_backend_methods(gogo));
   (*bfields)[0].location = loc;
 
-  Type* vt = Type::make_pointer_type(Type::make_void_type());
+  Type* vt = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   (*bfields)[1].name = "__object";
   (*bfields)[1].btype = vt->get_backend(gogo);
   (*bfields)[1].location = Linemap::predeclared_location();
@@ -9694,6 +10453,64 @@ Type::make_empty_interface_type(Location location)
   ret->finalize_methods();
   return ret;
 }
+
+Type*
+Interface_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
+Type*
+Interface_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Interface_type* x = a->interface_type();
+  if (x == NULL) {
+    return NULL;
+  }
+
+  if (x->is_nil_type()) {
+    std::map<Named_type*, Named_type*> seen;
+    if (this->wildcard(this, seen)->is_void_type()) {
+      seen.clear();
+      return x;
+    }
+    seen.clear();
+  }
+
+  Type* wildcard = NULL;
+
+  if (x->methods_are_finalized_ && this->methods_are_finalized_) {
+
+    if ((x->methods() != NULL) && (this->methods() != NULL)) {
+
+      Typed_identifier_list::const_iterator p = x->methods()->begin();
+      for (Typed_identifier_list::const_iterator q = this->methods()->begin();
+	   q != this->methods()->end() && p != x->methods()->end();
+	   ++q, ++p)
+	{
+
+          if ((q)->type()->is_void_type()) {
+            continue;
+          }
+
+          Type* wc = (q)->type()->dispatch_wildcard((p)->type(), saw);
+          wildcard = check_typeconflict(wc, wildcard, false);
+
+	}
+
+    }
+
+  }
+
+  return wildcard;
+}
+
+bool
+Interface_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  go_unreachable();
+}
+
 
 // Class Method.
 
@@ -10176,6 +10993,91 @@ Named_type::interface_method_table(Interface_type* interface, bool is_pointer)
                                       &this->interface_method_tables_,
                                       &this->pointer_interface_method_tables_);
 }
+
+Type*
+Named_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  if (saw.count(this) == 0) {
+    saw[this] = NULL;
+    Type* sub = this->real_type()->dispatch_substitute(wildcard_type, saw);
+    if (sub->is_error_type()) {
+      return sub;
+    }
+    if (sub == this->real_type()) {
+      return this;
+    }
+    return sub;
+  } else {
+    return saw.find(this)->second;
+  }
+}
+
+Type*
+Named_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Named_type* x = a->named_type();
+  if (x == NULL) {
+    //		printf("Named_type::wildcard 1 NULL\n");
+    return NULL;
+  }
+
+  if ((this == x) && (0 == this->name().compare(".reflect.rtype"))) {
+    return Type::make_error_type();
+  }
+  if ((this == x) && (0 == this->name().compare(".sync.entry"))) {
+    return Type::make_error_type();
+  }
+  if ((this == x) && (0 == this->name().compare(".sync.notifyList"))) {
+    return Type::make_error_type();
+  }
+
+
+  if (saw.count(this) > 0) {
+    Named_type* ret = saw.find(this)->second;
+    //		printf("Named_type::wildcard must be same:\n");
+    std::map<Named_type*, Named_type*> sawmap;
+    if (!ret->same(x, sawmap)) {
+      //			printf("Named_type::wildcard different ERROR\n");
+      sawmap.clear();
+      return Type::make_error_type();
+    }
+    sawmap.clear();
+    //		printf("Named_type::wildcard same NULL\n");
+    return NULL;
+  }
+  saw[this] = x;
+  //	printf("Named_type::wildcard Name: %s recursion\n", this->name().c_str());
+  return this->real_type()->dispatch_wildcard(x->real_type(), saw);
+}
+
+bool
+Named_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  Named_type* x = a->named_type();
+  if (x == NULL) {
+    //		printf("trivially different\n");
+
+    return false;
+  }
+
+  if (x == this) {
+    //		printf("trivially same\n");
+    return true;
+  }
+
+
+  if (saw.count(this) > 0) {
+    Named_type* ret = saw.find(this)->second;
+    //		printf("in hashmap\n");
+    return ret == x;
+  }
+  saw[this] = x;
+
+  //		printf("recursing\n");
+
+  return this->real_type()->dispatch_same(x->real_type(), saw);
+}
+
 
 // Look for a use of a complete type within another type.  This is
 // used to check that we don't try to use a type within itself.
@@ -12167,6 +13069,34 @@ Type*
 Type::make_forward_declaration(Named_object* named_object)
 {
   return new Forward_declaration_type(named_object);
+}
+
+
+Type*
+Forward_declaration_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
+{
+  return this;
+}
+
+Type*
+Forward_declaration_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  return NULL;
+}
+
+bool
+Forward_declaration_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
+{
+  if (a->forward_declaration_type() == NULL) {
+    //		printf("Other not forward.\n");
+
+    return false;
+  }
+  const std::string& name = a->forward_declaration_type()->name();
+
+  //	printf("Other not %s %s.\n", this->name().c_str(), name.c_str());
+
+  return 0 == name.compare((this->name()));
 }
 
 // Class Typed_identifier_list.

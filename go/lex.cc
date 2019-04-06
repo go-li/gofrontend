@@ -962,6 +962,9 @@ Lex::gather_identifier()
 	{
 	  switch (code)
 	    {
+	    case KEYWORD_CHAN:
+	      this->add_semi_at_eol_ = true;
+	      break;
 	    case KEYWORD_BREAK:
 	    case KEYWORD_CONTINUE:
 	    case KEYWORD_FALLTHROUGH:
@@ -1639,6 +1642,7 @@ Lex::one_character_operator(char c)
     case '^':
       return OPERATOR_XOR;
     case '*':
+      this->add_semi_at_eol_ = true;
       return OPERATOR_MULT;
     case '/':
       return OPERATOR_DIV;

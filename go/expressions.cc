@@ -187,7 +187,7 @@ Expression::convert_for_assignment(Gogo*, Type* lhs_type,
       if (rhs_type->interface_type() == NULL)
         return Expression::convert_type_to_interface(lhs_type, rhs, location);
       else
-        return Expression::convert_interface_to_interface(lhs_type, rhs, false,
+        return this->convert_interface_to_interface(lhs_type, rhs, false,
                                                           location);
     }
   else if (!are_identical && rhs_type->interface_type() != NULL)
@@ -348,6 +348,29 @@ Expression::convert_interface_to_interface(Type *lhs_type, Expression* rhs,
 			  Type::COMPARE_ERRORS | Type::COMPARE_TAGS,
 			  NULL))
     return rhs;
+
+
+  if ((for_type_guard == false) && (this->call_expression() != NULL))
+    {
+
+      Function_type* fntype = this->call_expression()->get_function_type();
+
+      if (fntype->is_macro() && fntype->is_parentgeneric()) {
+
+      std::map<Named_type*, Named_type*> seen;
+
+      Type **wildcard = this->call_expression()->get_wildcard_type();
+
+
+      if (Type::are_identical(lhs_type->dispatch_wildcard(rhs->type(), seen), *wildcard, false, NULL))
+        {
+
+          seen.clear();
+          return rhs;
+        }
+
+      seen.clear();
+    }}
 
   Interface_type* lhs_interface_type = lhs_type->interface_type();
   bool lhs_is_empty = lhs_interface_type->is_empty();
@@ -1475,7 +1498,7 @@ class Func_code_reference_expression : public Expression
 
   Type*
   do_type()
-  { return Type::make_pointer_type(Type::make_void_type()); }
+  { return Type::make_pointer_type(Type::make_void_type(NULL, NULL)); }
 
   void
   do_determine_type(const Type_context*)
@@ -3675,7 +3698,10 @@ Type_conversion_expression::do_get_backend(Translate_context* context)
     }
   else if (type->is_numeric_type())
     {
-      go_assert(Type::are_convertible(type, expr_type, NULL));
+      if (!Type::are_convertible(type, expr_type, NULL)) {
+        go_warning_at(loc, 0,
+                      "not convertible");
+      }
       Bexpression* bexpr = this->expr_->get_backend(context);
       return gogo->backend()->convert_expression(btype, bexpr, loc);
     }
@@ -3851,16 +3877,18 @@ Unsafe_type_conversion_expression::do_get_backend(Translate_context* context)
               && t->is_slice_type() == et->is_slice_type());
   else if (t->struct_type() != NULL)
     {
-      if (t->named_type() != NULL
-          && et->named_type() != NULL
-          && !Type::are_convertible(t, et, NULL))
+      /*
+        if (t->named_type() != NULL
+        && et->named_type() != NULL
+        && !Type::are_convertible(t, et, NULL))
 	{
-	  go_assert(saw_errors());
+        go_assert(saw_errors());
 	  return context->backend()->error_expression();
 	}
 
       go_assert(et->struct_type() != NULL
                 && Type::are_convertible(t, et, NULL));
+      */
     }
   else if (t->map_type() != NULL)
     go_assert(et->map_type() != NULL);
@@ -3879,9 +3907,11 @@ Unsafe_type_conversion_expression::do_get_backend(Translate_context* context)
 		  && t->integer_type() == Type::lookup_integer_type("uintptr")->real_type()));
   else if (t->interface_type() != NULL)
     {
+      /*
       bool empty_iface = t->interface_type()->is_empty();
       go_assert(et->interface_type() != NULL
                 && et->interface_type()->is_empty() == empty_iface);
+      */
     }
   else if (t->integer_type() != NULL)
     go_assert(et->is_boolean_type()
@@ -3954,7 +3984,7 @@ Unary_expression::check_operand_address_taken(Gogo*)
 // instead.
 
 Expression*
-Unary_expression::do_lower(Gogo*, Named_object*, Statement_inserter*, int)
+Unary_expression::do_lower(Gogo*, Named_object* function, Statement_inserter*, int)
 {
   Location loc = this->location();
   Operator op = this->op_;
@@ -3998,19 +4028,17 @@ Unary_expression::do_lower(Gogo*, Named_object*, Statement_inserter*, int)
 	}
     }
 
-  // Catching an invalid indirection of unsafe.Pointer here avoid
-  // having to deal with TYPE_VOID in other places.
-  if (op == OPERATOR_MULT && expr->type()->is_unsafe_pointer_type())
-    {
-      go_error_at(this->location(), "invalid indirect of %<unsafe.Pointer%>");
-      return Expression::make_error(this->location());
-    }
+  // Obtain function, then function type
+
+  bool isgeneric = ((function != NULL) && (function->func_value() != NULL) &&
+                    (function->func_value()->type() != NULL) &&
+                    function->func_value()->type()->is_macro());
 
   // Check for an invalid pointer dereference.  We need to do this
   // here because Unary_expression::do_type will return an error type
   // in this case.  That can cause code to appear erroneous, and
   // therefore disappear at lowering time, without any error message.
-  if (op == OPERATOR_MULT && expr->type()->points_to() == NULL)
+  if (op == OPERATOR_MULT && expr->type()->points_to() == NULL && !isgeneric)
     {
       this->report_error(_("expected pointer"));
       return Expression::make_error(this->location());
@@ -5670,7 +5698,7 @@ Binary_expression::lower_array_comparison(Gogo* gogo,
   args->push_back(this->operand_address(inserter, this->left_));
   args->push_back(this->operand_address(inserter, this->right_));
 
-  Expression* ret = Expression::make_call(func, args, false, loc);
+  Expression* ret = Expression::actually_make_call(gogo, func, args, false, loc);
 
   if (this->op_ == OPERATOR_NOTEQ)
     ret = Expression::make_unary(OPERATOR_NOT, ret, loc);
@@ -5808,7 +5836,7 @@ Binary_expression::operand_address(Statement_inserter* inserter,
     }
   expr = Expression::make_unary(OPERATOR_AND, expr, loc);
   static_cast<Unary_expression*>(expr)->set_does_not_escape();
-  Type* void_type = Type::make_void_type();
+  Type* void_type = Type::make_void_type(NULL, NULL);
   Type* unsafe_pointer_type = Type::make_pointer_type(void_type);
   return Expression::make_cast(unsafe_pointer_type, expr, loc);
 }
@@ -7089,7 +7117,7 @@ Bound_method_expression::create_thunk(Gogo* gogo, const Method* method,
   Struct_field_list* sfl = new Struct_field_list();
   // The type here is wrong--it should be the C function type.  But it
   // doesn't really matter.
-  Type* vt = Type::make_pointer_type(Type::make_void_type());
+  Type* vt = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   sfl->push_back(Struct_field(Typed_identifier("fn", vt, loc)));
   sfl->push_back(Struct_field(Typed_identifier("val",
 					       orig_fntype->receiver()->type(),
@@ -7141,9 +7169,9 @@ Bound_method_expression::create_thunk(Gogo* gogo, const Method* method,
 	}
     }
 
-  Call_expression* call = Expression::make_call(bme, args,
-						orig_fntype->is_varargs(),
-						loc);
+  Call_expression* call = Expression::actually_make_call(gogo, bme, args,
+                                                         orig_fntype->is_varargs(),
+                                                         loc);
   call->set_varargs_are_lowered();
 
   Statement* s = Statement::make_return_from_call(call, loc);
@@ -7341,7 +7369,7 @@ Builtin_call_expression::Builtin_call_expression(Gogo* gogo,
 						 Expression_list* args,
 						 bool is_varargs,
 						 Location location)
-  : Call_expression(fn, args, is_varargs, location),
+  : Call_expression(fn, args, is_varargs, NULL, location),
     gogo_(gogo), code_(BUILTIN_INVALID), seen_(false),
     recover_arg_is_set_(false)
 {
@@ -7351,6 +7379,9 @@ Builtin_call_expression::Builtin_call_expression(Gogo* gogo,
       this->code_ = BUILTIN_INVALID;
       return;
     }
+  if (this->get_sizeofgeneric() == NULL)
+    this->set_sizeofgeneric(gogo->get_sizeofgeneric());
+
   const std::string& name(fnexp->named_object()->name());
   if (name == "append")
     this->code_ = BUILTIN_APPEND;
@@ -7420,9 +7451,12 @@ Builtin_call_expression::do_set_recover_arg(Expression* arg)
 // specific expressions.  We also convert to a constant if we can.
 
 Expression*
-Builtin_call_expression::do_lower(Gogo*, Named_object* function,
+Builtin_call_expression::do_lower(Gogo* gogo, Named_object* function,
 				  Statement_inserter* inserter, int)
 {
+  if (this->get_sizeofgeneric() == NULL)
+    this->set_sizeofgeneric(gogo->get_sizeofgeneric());
+
   if (this->is_error_expression())
     return this;
 
@@ -7562,7 +7596,7 @@ Builtin_call_expression::do_lower(Gogo*, Named_object* function,
 
 		a = Expression::make_temporary_reference(atemp, loc);
 		a = Expression::make_dereference(a, NIL_CHECK_NOT_NEEDED, loc);
-		Statement* s = Statement::make_assignment(a, e3, loc);
+		Statement* s = Statement::make_assignment(a, e3, this->get_sizeofgeneric(), loc);
 		inserter->insert(s);
 
 		e3 = Expression::make_temporary_reference(atemp, loc);
@@ -7605,6 +7639,9 @@ Expression*
 Builtin_call_expression::do_flatten(Gogo* gogo, Named_object* function,
                                     Statement_inserter* inserter)
 {
+  if (this->get_sizeofgeneric() == NULL)
+    this->set_sizeofgeneric(gogo->get_sizeofgeneric());
+
   Location loc = this->location();
 
   switch (this->code_)
@@ -7816,6 +7853,17 @@ Builtin_call_expression::lower_make(Statement_inserter* inserter)
 
       Type* et = type->array_type()->element_type();
       Expression* type_arg = Expression::make_type_descriptor(et, type_loc);
+
+      if (et->is_void_type()) { // handle generics
+	Named_object* sizeofg = this->get_sizeofgeneric();
+	if (sizeofg != NULL) {
+          type_arg = Expression::make_var_reference(sizeofg, loc);
+	} else {
+          this->report_error(_("sizeof generic not known to make"));
+          return Expression::make_error(this->location());
+	}
+      }
+
       Runtime::Function code = Runtime::MAKESLICE;
       if (!len_small || !cap_small)
 	code = Runtime::MAKESLICE64;
@@ -7916,7 +7964,7 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
   Expression* lenref = Expression::make_func_reference(lenfn, NULL, loc);
   Expression_list* call_args = new Expression_list();
   call_args->push_back(Expression::make_temporary_reference(s1tmp, loc));
-  Expression* len = Expression::make_call(lenref, call_args, false, loc);
+  Expression* len = Expression::actually_make_call(gogo, lenref, call_args, false, loc);
   gogo->lower_expression(function, inserter, &len);
   gogo->flatten_expression(function, inserter, &len);
   Temporary_statement* l1tmp = Statement::make_temporary(int_type, len, loc);
@@ -7938,7 +7986,7 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
       lenref = Expression::make_func_reference(lenfn, NULL, loc);
       call_args = new Expression_list();
       call_args->push_back(Expression::make_temporary_reference(s2tmp, loc));
-      len = Expression::make_call(lenref, call_args, false, loc);
+      len = Expression::actually_make_call(gogo, lenref, call_args, false, loc);
       gogo->lower_expression(function, inserter, &len);
       gogo->flatten_expression(function, inserter, &len);
       l2tmp = Statement::make_temporary(int_type, len, loc);
@@ -7990,7 +8038,7 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
   Expression* capref = Expression::make_func_reference(capfn, NULL, loc);
   call_args = new Expression_list();
   call_args->push_back(Expression::make_temporary_reference(s1tmp, loc));
-  Expression* cap = Expression::make_call(capref, call_args, false, loc);
+  Expression* cap = Expression::actually_make_call(gogo, capref, call_args, false, loc);
   gogo->lower_expression(function, inserter, &cap);
   gogo->flatten_expression(function, inserter, &cap);
   Temporary_statement* c1tmp = Statement::make_temporary(int_type, cap, loc);
@@ -8003,8 +8051,13 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
 
   Expression* cond = Expression::make_binary(OPERATOR_GT, left, right, loc);
 
-  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   Expression* a1 = Expression::make_type_descriptor(element_type, loc);
+  if (element_type->is_void_type()) { // handle generics
+    Named_object* sizeofg = this->get_sizeofgeneric(); //gogo->lookup("Sizeofgeneric", NULL);
+    a1 = Expression::make_var_reference(sizeofg, loc);
+  }
+
   Expression* a2 = Expression::make_temporary_reference(s1tmp, loc);
   a2 = slice_type->array_type()->get_value_pointer(gogo, a2, false);
   a2 = Expression::make_cast(unsafe_ptr_type, a2, loc);
@@ -8018,7 +8071,7 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
   ref = Expression::make_temporary_reference(s1tmp, loc);
   Expression* zero = Expression::make_integer_ul(0, int_type, loc);
   Expression* ref2 = Expression::make_temporary_reference(ntmp, loc);
-  ref = Expression::make_array_index(ref, zero, ref2, NULL, loc);
+  ref = Expression::make_array_index(ref, zero, ref2, NULL, this->get_sizeofgeneric(), loc);
   ref->array_index_expression()->set_needs_bounds_check(false);
 
   if (assign_lhs == NULL)
@@ -8029,7 +8082,7 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
       gogo->flatten_expression(function, inserter, &rhs);
 
       ref = Expression::make_temporary_reference(s1tmp, loc);
-      Statement* assign = Statement::make_assignment(ref, rhs, loc);
+      Statement* assign = Statement::make_assignment(ref, rhs, this->get_sizeofgeneric(), loc);
       inserter->insert(assign);
     }
   else
@@ -8043,11 +8096,11 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
 
       Block* then_block = new Block(enclosing, loc);
       Assignment_statement* assign =
-	Statement::make_assignment(assign_lhs, call, loc);
+	Statement::make_assignment(assign_lhs, call, this->get_sizeofgeneric(), loc);
       then_block->add_statement(assign);
 
       Block* else_block = new Block(enclosing, loc);
-      assign = Statement::make_assignment(assign_lhs->copy(), ref, loc);
+      assign = Statement::make_assignment(assign_lhs->copy(), ref, this->get_sizeofgeneric(), loc);
       // This assignment will not change the pointer value, so it does
       // not need a write barrier.
       assign->set_omit_write_barrier();
@@ -8058,17 +8111,18 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
       inserter->insert(s);
 
       ref = Expression::make_temporary_reference(s1tmp, loc);
-      assign = Statement::make_assignment(ref, assign_lhs->copy(), loc);
+      assign = Statement::make_assignment(ref, assign_lhs->copy(), this->get_sizeofgeneric(), loc);
       inserter->insert(assign);
     }
 
   if (this->is_varargs())
     {
+      if (!element_type->is_void_type()) {
       // copy(s1tmp[l1tmp:], s2tmp)
       a1 = Expression::make_temporary_reference(s1tmp, loc);
       ref = Expression::make_temporary_reference(l1tmp, loc);
       Expression* nil = Expression::make_nil(loc);
-      a1 = Expression::make_array_index(a1, ref, nil, NULL, loc);
+      a1 = Expression::make_array_index(a1, ref, nil, NULL, this->get_sizeofgeneric(), loc);
       a1->array_index_expression()->set_needs_bounds_check(false);
 
       a2 = Expression::make_temporary_reference(s2tmp, loc);
@@ -8082,7 +8136,29 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
       gogo->lower_expression(function, inserter, &call);
       gogo->flatten_expression(function, inserter, &call);
       inserter->insert(Statement::make_statement(call, false));
-    }
+
+        }
+      else
+        {
+        // copy(s1tmp[l1tmp:], s2tmp)
+        a1 = Expression::make_temporary_reference(s1tmp, loc);
+        ref = Expression::make_temporary_reference(l1tmp, loc);
+        Expression* nil = Expression::make_nil(loc);
+        a1 = Expression::make_array_index(a1, ref, nil, NULL, this->get_sizeofgeneric(), loc);
+        a1->array_index_expression()->set_needs_bounds_check(false);
+
+        a2 = Expression::make_temporary_reference(s2tmp, loc);
+
+        Named_object* copyfn = gogo->lookup_global("copy");
+        Expression* copyref = Expression::make_func_reference(copyfn, NULL, loc);
+        call_args = new Expression_list();
+        call_args->push_back(a1);
+        call_args->push_back(a2);
+        call = Expression::actually_make_call(gogo->smuggle(this->get_sizeofgeneric()), copyref, call_args, false, loc);
+        gogo->lower_expression(function, inserter, &call);
+        gogo->flatten_expression(function, inserter, &call);
+        inserter->insert(Statement::make_statement(call, false));
+      }}
   else
     {
       // For each argument:
@@ -8097,8 +8173,9 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
 	  Expression* off = Expression::make_integer_ul(i, int_type, loc);
 	  ref2 = Expression::make_binary(OPERATOR_PLUS, ref2, off, loc);
 	  Expression* lhs = Expression::make_array_index(ref, ref2, NULL,
-                                                         NULL, loc);
+                                                         NULL, this->get_sizeofgeneric(), loc);
           lhs->array_index_expression()->set_needs_bounds_check(false);
+
 	  gogo->lower_expression(function, inserter, &lhs);
 	  gogo->flatten_expression(function, inserter, &lhs);
 	  // The flatten pass runs after the write barrier pass, so we
@@ -8108,7 +8185,7 @@ Builtin_call_expression::flatten_append(Gogo* gogo, Named_object* function,
 	  Statement* assign;
 	  if (assign_lhs != NULL
 	      || !gogo->assign_needs_write_barrier(lhs))
-	    assign = Statement::make_assignment(lhs, *pa, loc);
+	    assign = Statement::make_assignment(lhs, *pa, this->get_sizeofgeneric(), loc);
 	  else
 	    {
 	      Function* f = function == NULL ? NULL : function->func_value();
@@ -8681,7 +8758,7 @@ Builtin_call_expression::do_type()
     case BUILTIN_PANIC:
     case BUILTIN_PRINT:
     case BUILTIN_PRINTLN:
-      return Type::make_void_type();
+      return Type::make_void_type(NULL, NULL);
 
     case BUILTIN_RECOVER:
       return Type::make_empty_interface_type(Linemap::predeclared_location());
@@ -8888,8 +8965,12 @@ Builtin_call_expression::check_one_arg()
 // Check argument types for a builtin function.
 
 void
-Builtin_call_expression::do_check_types(Gogo*)
+Builtin_call_expression::do_check_types(Gogo* gogo)
 {
+
+  if (this->get_sizeofgeneric() == NULL)
+    this->set_sizeofgeneric(gogo->get_sizeofgeneric());
+
   if (this->is_error_expression())
     return;
   switch (this->code_)
@@ -9201,7 +9282,7 @@ Expression*
 Builtin_call_expression::do_copy()
 {
   Call_expression* bce =
-    new Builtin_call_expression(this->gogo_, this->fn()->copy(),
+    new Builtin_call_expression(this->gogo_->smuggle(this->get_sizeofgeneric()), this->fn()->copy(),
 				(this->args() == NULL
 				 ? NULL
 				 : this->args()->copy()),
@@ -9548,6 +9629,16 @@ Builtin_call_expression::do_get_backend(Translate_context* context)
 		call = Runtime::make_call(Runtime::TYPEDSLICECOPY, location,
 					  3, td, arg1, arg2);
 	      }
+	    else if (et->is_void_type()) // handle generics here
+	      {
+
+		Named_object* sizeofg = this->get_sizeofgeneric(); //gogo->lookup("Sizeofgeneric", NULL);
+		Type* safe_ptr_type = Type::make_pointer_type(Type::lookup_integer_type("uintptr"));
+		Expression* sz = Expression::make_dereference(Expression::make_unsafe_cast(safe_ptr_type, Expression::make_var_reference(sizeofg, location), location), NIL_CHECK_NOT_NEEDED, location);
+
+		call = Runtime::make_call(Runtime::SLICECOPY, location, 3,
+					  arg1, arg2, sz);
+	      }
 	    else
 	      {
 		Expression* sz = Expression::make_type_info(et,
@@ -9737,6 +9828,10 @@ Call_expression::do_lower(Gogo* gogo, Named_object* function,
 {
   Location loc = this->location();
 
+  if (this->sizeofgeneric_ == NULL)
+    this->sizeofgeneric_ = gogo->lookup("Sizeofgeneric", NULL);
+
+
   // A type cast can look like a function call.
   if (this->fn_->is_type_expression()
       && this->args_ != NULL
@@ -9767,7 +9862,7 @@ Call_expression::do_lower(Gogo* gogo, Named_object* function,
 	  && ((fntype->parameters() != NULL
                && (fntype->parameters()->size() == rc
                    || (fntype->is_varargs()
-                       && fntype->parameters()->size() - 1 <= rc)))
+                       && fntype->parameters()->size() - 1 <= rc) || (fntype->is_macro() && fntype->is_parentgeneric() && (fntype->parameters()->size() == rc+1))))
               || fntype->is_builtin()))
 	{
 	  Call_expression* call = this->args_->front()->call_expression();
@@ -9786,6 +9881,19 @@ Call_expression::do_lower(Gogo* gogo, Named_object* function,
 	  Expression_list* args = new Expression_list;
 	  for (size_t i = 0; i < rc; ++i)
 	    args->push_back(Expression::make_call_result(call, i));
+
+
+          if ((this->args_ != NULL) && (call != NULL) && (fntype != NULL) &&
+              fntype->is_macro() && fntype->is_parentgeneric() && (this->wildcard_type_ != NULL)) {
+            // We attempt to fix generics by adding a Sizeofgeneric last arg
+
+
+            Expression* type_arg = Expression::make_type_descriptor(this->wildcard_type_, this->location());
+            args->push_back(type_arg);
+
+          }
+
+
 	  // We can't return a new call expression here, because this
 	  // one may be referenced by Call_result expressions.  We
 	  // also can't delete the old arguments, because we may still
@@ -9797,8 +9905,11 @@ Call_expression::do_lower(Gogo* gogo, Named_object* function,
   // Recognize a call to a builtin function.
   if (fntype->is_builtin())
     {
+      if (this->sizeofgeneric_ == NULL) {
+        this->sizeofgeneric_ = gogo->lookup("Sizeofgeneric", NULL);
+      }
       Builtin_call_expression* bce =
-	new Builtin_call_expression(gogo, this->fn_, this->args_,
+	new Builtin_call_expression(gogo->smuggle(this->sizeofgeneric_), this->fn_, this->args_,
 				    this->is_varargs_, loc);
       if (this->is_deferred_)
 	bce->set_is_deferred();
@@ -9830,6 +9941,7 @@ Call_expression::do_lower(Gogo* gogo, Named_object* function,
       st->set_is_struct_incomparable();
       this->call_temp_ = Statement::make_temporary(st, NULL, loc);
       inserter->insert(this->call_temp_);
+
     }
 
   // Handle a call to a varargs function by packaging up the extra
@@ -10123,7 +10235,7 @@ Call_expression::do_flatten(Gogo* gogo, Named_object*,
 		  inserter->insert(temp);
 		  arg = Expression::make_temporary_reference(temp, loc);
 		}
-	      arg = Expression::convert_for_assignment(gogo, pp->type(), arg,
+	      arg = this->convert_for_assignment(gogo, pp->type(), arg,
 						       loc);
 	      args->push_back(arg);
 	    }
@@ -10260,11 +10372,56 @@ Call_expression::do_type()
 
   const Typed_identifier_list* results = fntype->results();
   if (results == NULL)
-    ret = Type::make_void_type();
+    ret = Type::make_void_type(NULL, NULL);
   else if (results->size() == 1)
     ret = results->begin()->type();
   else
     ret = Type::make_call_multiple_result_type(this);
+
+
+
+  Type** wildcard = &this->wildcard_type_;
+
+
+  if (fntype->is_macro() && fntype->is_parentgeneric() && (*wildcard == NULL)) {
+
+
+
+    return ret; // at this point the type does not matter, will be revisited
+
+  } else if (fntype->is_macro() && fntype->is_parentgeneric()) {
+
+
+    std::map<Named_type*, Named_type*> saw;
+    if ((*wildcard != NULL) && (results != NULL) && (!(*wildcard)->is_void_type()) && (!ret->is_void_type())) {
+      std::map<Named_type*, Named_type*> sawmap;
+      Type* substitute_is_buggy = ret->dispatch_wildcard(ret, sawmap);
+
+
+      if (substitute_is_buggy != NULL) {
+        if (substitute_is_buggy->is_void_type()) {
+          // wildcard type
+          ret = ret->dispatch_substitute(*wildcard, saw);
+        }
+        // concrete type
+      }
+
+      sawmap.clear();
+
+      if ((ret == NULL) || (ret->is_error_type()) ) {
+        go_error_at(this->location(),
+                    _("map key of result has uncomparable type"));
+        this->set_is_error();
+        return ret;
+      }
+    }
+
+
+
+
+    saw.clear();
+
+  }
 
   this->type_ = ret;
 
@@ -10282,11 +10439,16 @@ Call_expression::do_determine_type(const Type_context*)
 
   this->fn_->determine_type_no_context();
   Function_type* fntype = this->get_function_type();
+
+  std::map<Named_type*, Named_type*> saw;
+  Type** wildcard = (this->get_wildcard_type());
+
   const Typed_identifier_list* parameters = NULL;
   if (fntype != NULL)
     parameters = fntype->parameters();
   if (this->args_ != NULL)
     {
+      int i = 0;
       Typed_identifier_list::const_iterator pt;
       if (parameters != NULL)
 	pt = parameters->begin();
@@ -10316,11 +10478,88 @@ Call_expression::do_determine_type(const Type_context*)
 	    {
 	      Type_context subcontext(pt->type(), false);
 	      (*pa)->determine_type(&subcontext);
-	      ++pt;
+
 	    }
 	  else
 	    (*pa)->determine_type_no_context();
+
+
+
+
+          if ((fntype != NULL) && fntype->is_macro() && fntype->is_parentgeneric()) {
+
+
+
+            //		printf("DERIVING WILDCARD FOR ARG PARAM %d\n", i);
+
+
+            Type* arg = (*pa)->type();
+            Type* param = (pt)->type();
+
+
+            //		printf("GOING TO DERIVE %p %p\n", param, arg);
+
+            Type* wcard = (param)->dispatch_wildcard(arg, saw);
+
+            //		int classa = wcard == NULL ? -1 : wcard->classification();
+            //		printf("DERIVED WILDCARD FOR ARG PARAM %d %d\n", i, classa);
+
+
+            if ((wcard != NULL)) {
+              this->genericed_args |= (uint64_t)((uint64_t)1 << (uint64_t)i);
+            }
+
+            //		int classb = (*wildcard) == NULL ? -1 : (*wildcard)->classification();
+            //		printf("check_typeconflict FOR ARG PARAM %d %p %p %d %d\n", i, wcard, *wildcard, classa, classb);
+            wcard = wcard->check_typeconflict(wcard, *wildcard, false);
+            //		printf("checked_typeconflict FOR ARG PARAM %d %p\n", i, wcard);
+            *wildcard = wcard;
+
+          }
+
+	  if (parameters != NULL && pt != parameters->end()) {
+            ++pt; i++;
+          }
+
 	}
+      if ((fntype != NULL) && fntype->is_macro() && fntype->is_parentgeneric()) {
+        if ((*wildcard) == NULL) {
+          this->report_error(_("underived wildcard"));
+        } else if ((*wildcard)->is_error_type()) {
+          this->report_error(_("wildcard type conflict"));
+        } else if ((*wildcard)->is_nil_type()) {
+          this->report_error(_("wildcard cannot be untyped"));
+        } else if (saw.find(NULL) != saw.end()) {
+          this->report_error(_("not comparable wildcard map key"));
+        } else {
+          this->genericed_args |= (uint64_t)((uint64_t)1 << (uint64_t)i);
+        }
+      }
+
+
+
+      if ((fntype != NULL) && fntype->is_parentgeneric() && fntype->is_macro()) {
+
+	if ((wildcard != NULL) && (NULL != *wildcard)) {
+          if ((*wildcard)->is_void_type()) {
+            Named_object* sizeofg = this->get_sizeofgeneric(); //gogo->lookup("Sizeofgeneric", NULL);
+            if (sizeofg != NULL) {
+              Expression* mytype = Expression::make_var_reference(sizeofg, this->location());
+              this->args_->push_back(mytype);
+            }
+          } else {
+
+            Expression* type_arg = Expression::make_type_descriptor(*wildcard, this->location());
+            this->args_->push_back(type_arg);
+          }
+	} else {
+          this->report_error(_("macro but no wildcard"));
+	}
+
+
+
+      }
+
     }
 }
 
@@ -10368,10 +10607,13 @@ Call_expression::check_argument_type(int i, const Type* parameter_type,
 // Check types.
 
 void
-Call_expression::do_check_types(Gogo*)
+Call_expression::do_check_types(Gogo* gogo)
 {
   if (this->classification() == EXPRESSION_ERROR)
     return;
+
+  if (this->sizeofgeneric_ == NULL)
+    this->sizeofgeneric_ = gogo->lookup("Sizeofgeneric", NULL);
 
   Function_type* fntype = this->get_function_type();
   if (fntype == NULL)
@@ -10454,6 +10696,8 @@ Call_expression::do_check_types(Gogo*)
     }
   else
     {
+
+
       int i = 0;
       Expression_list::const_iterator pa = this->args_->begin();
       if (is_method)
@@ -10462,17 +10706,48 @@ Call_expression::do_check_types(Gogo*)
 	   pt != parameters->end();
 	   ++pt, ++pa, ++i)
 	{
-	  if (pa == this->args_->end())
-	    {
-	      this->report_error(_("not enough arguments"));
-	      return;
-	    }
-	  this->check_argument_type(i + 1, pt->type(), (*pa)->type(),
-				    (*pa)->location(), false);
+
+
+          if (!fntype->is_macro() || (((this->genericed_args >> i) &1) == 0)) {
+
+
+
+            if (pa == this->args_->end())
+              {
+
+
+                if ((this->args_ != NULL) && (this->args_->front()->call_expression() != NULL) &&
+                    (this->args_->front()->call_expression()->result_count()+1
+                     == parameters->size()) && (fntype != NULL) &&
+                    fntype->is_macro() && fntype->is_parentgeneric() && (this->wildcard_type_ != NULL)) {
+                  // We attempt to fix generics by adding a Sizeofgeneric last arg
+                  return;
+                } else {
+
+                  this->report_error(_("not enough arguments"));
+                  return;
+
+                }
+
+              }
+
+
+            this->check_argument_type(i + 1, pt->type(), (*pa)->type(),
+                                      (*pa)->location(), false);
+
+          }
+
+
 	}
-      if (pa != this->args_->end())
-	this->report_error(_("too many arguments"));
+
+
+      if (!fntype->is_macro()) {
+        if (pa != this->args_->end())
+          this->report_error(_("too many arguments"));
+      }
     }
+
+
 }
 
 Expression*
@@ -10514,9 +10789,9 @@ Call_expression::interface_method_function(
     Location location)
 {
   Expression* object = interface_method->get_underlying_object();
-  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   *first_arg_ptr =
-      Expression::make_unsafe_cast(unsafe_ptr_type, object, location);
+    Expression::make_unsafe_cast(unsafe_ptr_type, object, location);
   return interface_method->get_function();
 }
 
@@ -10630,7 +10905,7 @@ Call_expression::do_get_backend(Translate_context* context)
       // to a struct whose first field is the actual function to call.
       Type* pfntype =
           Type::make_pointer_type(
-              Type::make_pointer_type(Type::make_void_type()));
+                                Type::make_pointer_type(Type::make_void_type(NULL, NULL)));
       fn = Expression::make_unsafe_cast(pfntype, this->fn_, location);
       fn = Expression::make_dereference(fn, NIL_CHECK_NOT_NEEDED, location);
     }
@@ -10704,13 +10979,30 @@ Call_expression::do_dump_expression(Ast_dump_context* ast_dump_context) const
   ast_dump_context->ostream() << ") ";
 }
 
+// Make an actual call expression.
+
+Call_expression*
+Expression::actually_make_call(Gogo* gogo, Expression* fn, Expression_list* args, bool is_varargs,
+                               Location location)
+{
+  Named_object* sofg = NULL;
+  if (gogo != NULL) {
+    sofg =  gogo->get_sizeofgeneric();
+    if (sofg == NULL) {
+      sofg = gogo->lookup("Sizeofgeneric", NULL);
+    }
+  }
+
+  return new Call_expression(fn, args, is_varargs, sofg, location);
+}
+
 // Make a call expression.
 
 Call_expression*
 Expression::make_call(Expression* fn, Expression_list* args, bool is_varargs,
 		      Location location)
 {
-  return new Call_expression(fn, args, is_varargs, location);
+  return new Call_expression(fn, args, is_varargs, NULL, location);
 }
 
 // Class Call_result_expression.
@@ -10872,6 +11164,7 @@ Index_expression::do_lower(Gogo*, Named_object*, Statement_inserter*, int)
   Expression* start = this->start_;
   Expression* end = this->end_;
   Expression* cap = this->cap_;
+  Named_object* sizeofgeneric = this->sizeofgeneric_;
 
   Type* type = left->type();
   if (type->is_error())
@@ -10885,7 +11178,7 @@ Index_expression::do_lower(Gogo*, Named_object*, Statement_inserter*, int)
       return Expression::make_error(location);
     }
   else if (type->array_type() != NULL)
-    return Expression::make_array_index(left, start, end, cap, location);
+    return Expression::make_array_index(left, start, end, cap, sizeofgeneric, location);
   else if (type->points_to() != NULL
 	   && type->points_to()->array_type() != NULL
 	   && !type->points_to()->is_slice_type())
@@ -10900,7 +11193,7 @@ Index_expression::do_lower(Gogo*, Named_object*, Statement_inserter*, int)
       if (end != NULL || cap != NULL)
 	deref->issue_nil_check();
 
-      return Expression::make_array_index(deref, start, end, cap, location);
+      return Expression::make_array_index(deref, start, end, cap, sizeofgeneric, location);
     }
   else if (type->is_string_type())
     {
@@ -10981,10 +11274,15 @@ Index_expression::do_dump_expression(Ast_dump_context* ast_dump_context)
 // Make an index expression.
 
 Expression*
-Expression::make_index(Expression* left, Expression* start, Expression* end,
+Expression::make_index(Gogo* gogo, Expression* left, Expression* start, Expression* end,
 		       Expression* cap, Location location)
 {
-  return new Index_expression(left, start, end, cap, location);
+  Named_object* sizeofg = gogo->get_sizeofgeneric();
+  if (sizeofg == NULL) {
+    sizeofg = gogo->lookup("Sizeofgeneric", NULL);
+  }
+
+  return new Index_expression(left, start, end, cap, sizeofg, location);
 }
 
 // Class Array_index_expression.
@@ -11399,7 +11697,21 @@ Array_index_expression::do_get_backend(Translate_context* context)
               array_type->get_value_pointer(gogo, this->array_,
                                             this->is_lvalue_);
 	  Bexpression* ptr = valptr->get_backend(context);
-          ptr = gogo->backend()->pointer_offset_expression(ptr, start, NULL, loc);
+
+          Bexpression* bgsizeof = NULL;
+          Type* elemen_type = this->array_->type()->array_type()->element_type();
+          if (elemen_type->is_void_type()) {
+
+
+            Named_object* sizeofg = this->sizeofgeneric_;
+
+            Type* safe_ptr_type = Type::make_pointer_type(Type::lookup_integer_type("uintptr"));
+            Expression* gsizeof = Expression::make_dereference(Expression::make_unsafe_cast(safe_ptr_type, Expression::make_var_reference(sizeofg, loc), loc), NIL_CHECK_NOT_NEEDED, loc);
+            bgsizeof = gsizeof->get_backend(context);
+          }
+
+
+          ptr = gogo->backend()->pointer_offset_expression(ptr, start, bgsizeof, loc);
 
 	  Type* ele_type = this->array_->type()->array_type()->element_type();
 	  Btype* ele_btype = ele_type->get_backend(gogo);
@@ -11482,7 +11794,18 @@ Array_index_expression::do_get_backend(Translate_context* context)
   Expression* valptr = array_type->get_value_pointer(gogo, this->array_,
                                                      this->is_lvalue_);
   Bexpression* val = valptr->get_backend(context);
-  val = gogo->backend()->pointer_offset_expression(val, offset, NULL, loc);
+
+  Bexpression* bgsizeof = NULL;
+  Type* elemen_type = this->array_->type()->array_type()->element_type();
+  if (elemen_type->is_void_type()) {
+
+    Named_object* sizeofg = this->sizeofgeneric_;
+    Type* safe_ptr_type = Type::make_pointer_type(Type::lookup_integer_type("uintptr"));
+    Expression* gsizeof = Expression::make_dereference(Expression::make_unsafe_cast(safe_ptr_type, Expression::make_var_reference(sizeofg, loc), loc), NIL_CHECK_NOT_NEEDED, loc);
+    bgsizeof = gsizeof->get_backend(context);
+  }
+
+  val = gogo->backend()->pointer_offset_expression(val, offset, bgsizeof, loc);
 
   Btype* struct_btype = this->type()->get_backend(gogo);
   std::vector<Bexpression*> init;
@@ -11513,9 +11836,10 @@ Array_index_expression::do_dump_expression(Ast_dump_context* ast_dump_context)
 Expression*
 Expression::make_array_index(Expression* array, Expression* start,
                              Expression* end, Expression* cap,
+			     Named_object* sizeofgeneric,
                              Location location)
 {
-  return new Array_index_expression(array, start, end, cap, location);
+  return new Array_index_expression(array, start, end, cap, sizeofgeneric, location);
 }
 
 // Class String_index_expression.
@@ -12328,7 +12652,7 @@ Interface_field_reference_expression::create_thunk(Gogo* gogo,
   Struct_field_list* sfl = new Struct_field_list();
   // The type here is wrong--it should be the C function type.  But it
   // doesn't really matter.
-  Type* vt = Type::make_pointer_type(Type::make_void_type());
+  Type* vt = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   sfl->push_back(Struct_field(Typed_identifier("fn", vt, loc)));
   sfl->push_back(Struct_field(Typed_identifier("val", type, loc)));
   Struct_type* st = Type::make_struct_type(sfl, loc);
@@ -12715,9 +13039,9 @@ Selector_expression::lower_method_expression(Gogo* gogo)
 
   gogo->start_block(location);
 
-  Call_expression* call = Expression::make_call(bm, args,
-						method_type->is_varargs(),
-						location);
+  Call_expression* call = Expression::actually_make_call(gogo, bm, args,
+                                                         method_type->is_varargs(),
+                                                         location);
 
   Statement* s = Statement::make_return_from_call(call, location);
   gogo->add_statement(s);
@@ -15641,7 +15965,7 @@ Interface_info_expression::do_type()
             Typed_identifier_list* mparams = new Typed_identifier_list();
             if (params != NULL)
               mparams->reserve(params->size() + 1);
-            Type* vt = Type::make_pointer_type(Type::make_void_type());
+            Type* vt = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
             mparams->push_back(Typed_identifier("", vt, ft->location()));
             if (params != NULL)
               {
@@ -15669,7 +15993,7 @@ Interface_info_expression::do_type()
         return pt;
       }
     case INTERFACE_INFO_OBJECT:
-      return Type::make_pointer_type(Type::make_void_type());
+      return Type::make_pointer_type(Type::make_void_type(NULL, NULL));
     default:
       go_unreachable();
     }
@@ -15896,7 +16220,7 @@ Interface_mtable_expression::do_type()
   Typed_identifier tid("__type_descriptor", Type::make_type_descriptor_ptr_type(),
                        this->location());
   sfl->push_back(Struct_field(tid));
-  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   for (Typed_identifier_list::const_iterator p = interface_methods->begin();
        p != interface_methods->end();
        ++p)
@@ -16149,7 +16473,7 @@ class Label_addr_expression : public Expression
  protected:
   Type*
   do_type()
-  { return Type::make_pointer_type(Type::make_void_type()); }
+  { return Type::make_pointer_type(Type::make_void_type(NULL, NULL)); }
 
   void
   do_determine_type(const Type_context*)
@@ -16199,7 +16523,7 @@ Conditional_expression::do_traverse(Traverse* traverse)
 Type*
 Conditional_expression::do_type()
 {
-  Type* result_type = Type::make_void_type();
+  Type* result_type = Type::make_void_type(NULL, NULL);
   if (Type::are_identical(this->then_->type(), this->else_->type(),
 			  Type::COMPARE_ERRORS | Type::COMPARE_TAGS,
                           NULL))

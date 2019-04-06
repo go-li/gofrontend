@@ -50,7 +50,8 @@ Parse::Parse(Lex* lex, Gogo* gogo)
     gogo_(gogo),
     break_stack_(NULL),
     continue_stack_(NULL),
-    enclosing_vars_()
+    enclosing_vars_(),
+    early_sizeofgeneric_references_()
 {
 }
 
@@ -249,7 +250,7 @@ Parse::type()
     {
       Location location = token->location();
       this->advance_token();
-      Type* type = this->signature(NULL, location);
+      Type* type = this->signature(NULL, location, false);
       if (type == NULL)
 	return Type::make_error_type();
       return type;
@@ -272,6 +273,16 @@ Parse::type()
 	    go_error_at(this->location(), "expected %<)%>");
 	}
       return ret;
+    }
+  else if ((token->is_op(OPERATOR_RPAREN)) || (token->is_op(OPERATOR_COMMA)) ||
+           (token->is_op(OPERATOR_RCURLY)) || (token->is_op(OPERATOR_LCURLY)) ||
+           (token->is_op(OPERATOR_SEMICOLON)) || token->is_op(OPERATOR_EQ))
+    {
+      Named_object** result = NULL;
+
+      Type* v = Type::make_void_type(this->gogo_->lookup("Sizeofgeneric", NULL), &result);
+      this->early_sizeofgeneric_references_.push_back(result);
+      return v;
     }
   else
     {
@@ -442,13 +453,17 @@ Parse::map_type()
     }
   this->advance_token();
 
-  Type* key_type = this->type();
+  Type* key_type = NULL;
 
-  if (!this->peek_token()->is_op(OPERATOR_RSQUARE))
+  if (!this->type_may_start_here())
     {
-      go_error_at(this->location(), "expected %<]%>");
-      return Type::make_error_type();
+      key_type = Type::make_void_type(this->gogo_->lookup("Sizeofgeneric", NULL), NULL);
     }
+  else
+    {
+      key_type = this->type();
+    }
+
   this->advance_token();
 
   Type* value_type = this->type();
@@ -674,22 +689,6 @@ Parse::channel_type()
 	}
     }
 
-  // Better error messages for the common error of omitting the
-  // channel element type.
-  if (!this->type_may_start_here())
-    {
-      token = this->peek_token();
-      if (token->is_op(OPERATOR_RCURLY))
-	go_error_at(this->location(), "unexpected %<}%> in channel type");
-      else if (token->is_op(OPERATOR_RPAREN))
-	go_error_at(this->location(), "unexpected %<)%> in channel type");
-      else if (token->is_op(OPERATOR_COMMA))
-	go_error_at(this->location(), "unexpected comma in channel type");
-      else
-	go_error_at(this->location(), "expected channel element type");
-      return Type::make_error_type();
-    }
-
   Type* element_type = this->type();
   return Type::make_channel_type(send, receive, element_type);
 }
@@ -728,11 +727,13 @@ Parse::check_signature_names(const Typed_identifier_list* params,
 // This returns NULL on a parse error.
 
 Function_type*
-Parse::signature(Typed_identifier* receiver, Location location)
+Parse::signature(Typed_identifier* receiver, Location location, bool addsizeofgeneric)
 {
+  bool is_polymorphic = false;
   bool is_varargs = false;
+  bool isparentgeneric = true;
   Typed_identifier_list* params;
-  bool params_ok = this->parameters(&params, &is_varargs);
+  bool params_ok = this->parameters(&params, &is_varargs, &is_polymorphic);
 
   Typed_identifier_list* results = NULL;
   if (this->peek_token()->is_op(OPERATOR_LPAREN)
@@ -753,10 +754,49 @@ Parse::signature(Typed_identifier* receiver, Location location)
   if (results != NULL)
     this->check_signature_names(results, &names);
 
+
+
+  Named_object* enclosing_function = NULL;
+
+  if (!this->gogo_->in_global_scope()) {
+
+    enclosing_function = this->gogo_->current_function();
+
+  }
+
+  isparentgeneric = ((enclosing_function != NULL) && (enclosing_function->func_value() != NULL) &&
+                     (enclosing_function->func_value()->type() != NULL) &&
+                     enclosing_function->func_value()->type()->is_macro());
+
+  // here we add the Sizeofgeneric parameter
+  if (is_polymorphic) {
+    if (addsizeofgeneric) {
+      if (params != NULL) {
+        if (!isparentgeneric) {
+          // Make sure the vararg stays the last parameter
+          Typed_identifier vararg = params->back();
+          if (is_varargs)
+            params->pop_back();
+
+          Type* unsafe_pointer_type = Type::make_type_descriptor_ptr_type();
+
+          std::string id_name = "Sizeofgeneric";
+          params->push_back(Typed_identifier(id_name, unsafe_pointer_type, location));
+
+          if (is_varargs)
+            params->push_back(vararg);
+        }}}}
+
+
+
   Function_type* ret = Type::make_function_type(receiver, params, results,
 						location);
   if (is_varargs)
     ret->set_is_varargs();
+  if (is_polymorphic)
+    ret->set_is_macro();
+  if (addsizeofgeneric && !isparentgeneric)
+    ret->set_parentgeneric();
   return ret;
 }
 
@@ -765,7 +805,7 @@ Parse::signature(Typed_identifier* receiver, Location location)
 // This returns false on a parse error.
 
 bool
-Parse::parameters(Typed_identifier_list** pparams, bool* is_varargs)
+Parse::parameters(Typed_identifier_list** pparams, bool* is_varargs, bool* is_pmorph)
 {
   *pparams = NULL;
 
@@ -781,7 +821,8 @@ Parse::parameters(Typed_identifier_list** pparams, bool* is_varargs)
   const Token* token = this->advance_token();
   if (!token->is_op(OPERATOR_RPAREN))
     {
-      params = this->parameter_list(is_varargs);
+      params = this->parameter_list(is_varargs, is_pmorph);
+
       if (params == NULL)
 	saw_error = true;
       token = this->peek_token();
@@ -813,7 +854,7 @@ Parse::parameters(Typed_identifier_list** pparams, bool* is_varargs)
 // This returns NULL if some error is seen.
 
 Typed_identifier_list*
-Parse::parameter_list(bool* is_varargs)
+Parse::parameter_list(bool* is_varargs, bool* is_pmorph)
 {
   Location location = this->location();
   Typed_identifier_list* ret = new Typed_identifier_list();
@@ -927,7 +968,18 @@ Parse::parameter_list(bool* is_varargs)
 	      // We have just seen ID1, ID2 xxx.
 	      Type* type;
 	      if (!this->peek_token()->is_op(OPERATOR_ELLIPSIS))
-		type = this->type();
+		{
+		  type = this->type();
+
+		  if ((is_pmorph != NULL) && (!*is_pmorph) && (!this->gogo_->imported_unsafe())) {
+		    std::map<Named_type*, Named_type*> sawmap;
+		    Type *wc = type->dispatch_wildcard(type, sawmap);
+		    if ((wc != NULL) && wc->is_void_type())
+			*is_pmorph = true;
+		    sawmap.clear();
+		  }
+
+		}
 	      else
 		{
 		  go_error_at(this->location(),
@@ -980,7 +1032,7 @@ Parse::parameter_list(bool* is_varargs)
 
   bool mix_error = false;
   this->parameter_decl(parameters_have_names, ret, is_varargs, &mix_error,
-		       &saw_error);
+		       &saw_error, is_pmorph);
   while (this->peek_token()->is_op(OPERATOR_COMMA))
     {
       if (this->advance_token()->is_op(OPERATOR_RPAREN))
@@ -991,7 +1043,7 @@ Parse::parameter_list(bool* is_varargs)
 	  saw_error = true;
 	}
       this->parameter_decl(parameters_have_names, ret, is_varargs, &mix_error,
-			   &saw_error);
+			   &saw_error, is_pmorph);
     }
   if (mix_error)
     {
@@ -1013,7 +1065,8 @@ Parse::parameter_decl(bool parameters_have_names,
 		      Typed_identifier_list* til,
 		      bool* is_varargs,
 		      bool* mix_error,
-		      bool* saw_error)
+		      bool* saw_error,
+		      bool* is_pmorph)
 {
   if (!parameters_have_names)
     {
@@ -1022,7 +1075,20 @@ Parse::parameter_decl(bool parameters_have_names,
       if (!this->peek_token()->is_identifier())
 	{
 	  if (!this->peek_token()->is_op(OPERATOR_ELLIPSIS))
-	    type = this->type();
+	    {
+              type = this->type();
+
+              if ((is_pmorph != NULL) && (!*is_pmorph) && (!this->gogo_->imported_unsafe())) {
+                std::map<Named_type*, Named_type*> sawmap;
+                Type *wc = type->dispatch_wildcard(type, sawmap);
+                if ((wc != NULL) && wc->is_void_type())
+                  *is_pmorph = true;
+                sawmap.clear();
+              }
+
+
+
+	    }
 	  else
 	    {
 	      if (is_varargs == NULL)
@@ -1036,6 +1102,17 @@ Parse::parameter_decl(bool parameters_have_names,
 	      else
 		{
 		  Type* element_type = this->type();
+
+
+                  if ((is_pmorph != NULL) && (!*is_pmorph) && (!this->gogo_->imported_unsafe())) {
+                    std::map<Named_type*, Named_type*> sawmap;
+                    Type *wc = element_type->dispatch_wildcard(element_type, sawmap);
+                    if ((wc != NULL) && wc->is_void_type())
+                      *is_pmorph = true;
+                    sawmap.clear();
+                  }
+
+
 		  type = Type::make_array_type(element_type, NULL);
 		}
 	    }
@@ -1070,7 +1147,18 @@ Parse::parameter_decl(bool parameters_have_names,
 
       Type* type;
       if (!this->peek_token()->is_op(OPERATOR_ELLIPSIS))
-	type = this->type();
+	{
+          type = this->type();
+
+          if ((is_pmorph != NULL) && (!*is_pmorph) && (!this->gogo_->imported_unsafe())) {
+            std::map<Named_type*, Named_type*> sawmap;
+            Type *wc = type->dispatch_wildcard(type, sawmap);
+            if ((wc != NULL) && wc->is_void_type())
+              *is_pmorph = true;
+            sawmap.clear();
+          }
+
+	}
       else
 	{
 	  if (is_varargs == NULL)
@@ -1087,6 +1175,15 @@ Parse::parameter_decl(bool parameters_have_names,
 	    *is_varargs = true;
 	  this->advance_token();
 	  Type* element_type = this->type();
+
+          if ((is_pmorph != NULL) && (!*is_pmorph) && (!this->gogo_->imported_unsafe())) {
+            std::map<Named_type*, Named_type*> sawmap;
+            Type *wc = element_type->dispatch_wildcard(element_type, sawmap);
+            if ((wc != NULL) && wc->is_void_type())
+              *is_pmorph = true;
+            sawmap.clear();
+          }
+
 	  type = Type::make_array_type(element_type, NULL);
 	}
       for (size_t i = orig_count; i < new_count; ++i)
@@ -1102,7 +1199,7 @@ bool
 Parse::result(Typed_identifier_list** presults)
 {
   if (this->peek_token()->is_op(OPERATOR_LPAREN))
-    return this->parameters(presults, NULL);
+    return this->parameters(presults, NULL, NULL);
   else
     {
       Location location = this->location();
@@ -1267,7 +1364,7 @@ Parse::method_spec(Typed_identifier_list* methods)
 	go_error_at(this->location(),
                     "methods must have a unique non-blank name");
       name = this->gogo_->pack_hidden_name(name, is_exported);
-      Type* type = this->signature(NULL, location);
+      Type* type = this->signature(NULL, location, false);
       if (type == NULL)
 	return;
       methods->push_back(Typed_identifier(name, type, location));
@@ -2096,6 +2193,7 @@ Parse::finish_init_vars(Expression_list* vars, Expression_list* vals,
       go_assert(!this->gogo_->in_global_scope());
       this->gogo_->add_statement(Statement::make_assignment(vars->front(),
 							    vals->front(),
+							    this->gogo_->lookup("Sizeofgeneric", NULL),
 							    location));
       delete vars;
       delete vals;
@@ -2301,7 +2399,7 @@ Parse::function_decl(unsigned int pragmas)
 
   this->advance_token();
 
-  Function_type* fntype = this->signature(rec, this->location());
+  Function_type* fntype = this->signature(rec, this->location(), true);
 
   Named_object* named_object = NULL;
 
@@ -2458,8 +2556,20 @@ Parse::function_decl(unsigned int pragmas)
 	  name = this->gogo_->pack_hidden_name("_", false);
 	}
       named_object = this->gogo_->start_function(name, fntype, true, location);
+
+      Named_object* sizeofgeneric = this->gogo_->lookup("Sizeofgeneric", NULL);
+      for (std::vector<Named_object**>::iterator voidtype = this->early_sizeofgeneric_references_.begin();
+           voidtype != this->early_sizeofgeneric_references_.end(); ++voidtype)
+	{
+          if (*voidtype != NULL)
+            **voidtype = sizeofgeneric;
+	}
+      this->early_sizeofgeneric_references_.clear();
+
       Location end_loc = this->block();
       this->gogo_->finish_function(end_loc);
+
+
 
       if (pragmas != 0
 	  && !this->is_erroneous_function_
@@ -2476,7 +2586,7 @@ Parse::receiver()
 {
   Location location = this->location();
   Typed_identifier_list* til;
-  if (!this->parameters(&til, NULL))
+  if (!this->parameters(&til, NULL, NULL))
     return NULL;
   else if (til == NULL || til->empty())
     {
@@ -2700,6 +2810,11 @@ Parse::operand(bool may_be_sink, bool* is_parenthesized)
 	  // case where an ellipsis is permitted for an array type.
 	  Location location = token->location();
 	  return Expression::make_type(this->array_type(true), location);
+	}
+      else if (token->is_op(OPERATOR_RPAREN))
+	{
+	  Location location = token->location();
+	  return Expression::make_type(Type::make_void_type(this->gogo_->lookup("Sizeofgeneric", NULL), NULL), location);
 	}
       break;
 
@@ -2956,7 +3071,7 @@ Parse::function_lit()
   Enclosing_vars hold_enclosing_vars;
   hold_enclosing_vars.swap(this->enclosing_vars_);
 
-  Function_type* type = this->signature(NULL, location);
+  Function_type* type = this->signature(NULL, location, false);
   bool fntype_is_error = false;
   if (type == NULL)
     {
@@ -2981,7 +3096,56 @@ Parse::function_lit()
   this->break_stack_ = NULL;
   this->continue_stack_ = NULL;
 
+  Named_object* upper_function = NULL;
+  if (!this->gogo_->in_global_scope()) {
+    upper_function = this->gogo_->current_function();
+  }
+
   Named_object* no = this->gogo_->start_function("", type, true, location);
+
+  /////////////////////////
+
+
+
+  Named_object* enclosing_function = NULL;
+
+  if (!this->gogo_->in_global_scope()) {
+
+    enclosing_function = this->gogo_->current_function();
+
+  }
+
+  bool isparentgeneric = ((enclosing_function != NULL) &&
+                          (enclosing_function->func_value() != NULL) &&
+                          (enclosing_function->func_value()->is_parent_generic() != NULL));
+
+
+  if (isparentgeneric) {
+
+
+
+
+    Named_object* sog = this->gogo_->lookup("Sizeofgeneric", NULL);
+
+
+    Expression* soge = this->enclosing_var_reference(upper_function, sog, false, location);
+
+
+
+
+    Variable* this_param = new Variable(Type::make_type_descriptor_ptr_type(),
+					soge, false,
+                                        false, false, location);
+
+    this_param->set_is_used();
+
+
+    this->gogo_->add_variable("Sizeofgeneric",  this_param);
+
+
+  }
+
+  //////////////////////////////////
 
   Location end_loc = this->block();
 
@@ -3304,7 +3468,7 @@ Parse::index(Expression* expr)
     go_error_at(this->location(), "missing %<]%>");
   else
     this->advance_token();
-  return Expression::make_index(expr, start, end, cap, location);
+  return Expression::make_index(this->gogo_, expr, start, end, cap, location);
 }
 
 // Call           = "(" [ ArgumentList [ "," ] ] ")" .
@@ -3338,7 +3502,7 @@ Parse::call(Expression* func)
   this->advance_token();
   if (func->is_error_expression())
     return func;
-  return Expression::make_call(func, args, is_varargs, func->location());
+  return Expression::actually_make_call(this->gogo_, func, args, is_varargs, func->location());
 }
 
 // Return an expression for a single unqualified identifier.
@@ -3487,6 +3651,8 @@ Parse::expression(Precedence precedence, bool may_be_sink,
       Operator op = token->op();
       Location binop_location = token->location();
 
+
+
       if (precedence >= right_precedence)
 	{
 	  // We've already seen A * B, and we see + C.  We want to
@@ -3494,7 +3660,18 @@ Parse::expression(Precedence precedence, bool may_be_sink,
 	  return left;
 	}
 
-      this->advance_token();
+      if (op == OPERATOR_MULT)
+        {
+	  this->advance_token();
+	  const Token* maybesemi = this->peek_token();
+	  if (maybesemi->is_op(OPERATOR_SEMICOLON))
+	    {
+              this->advance_token();
+	    }
+        }
+      else
+        this->advance_token();
+
 
       left = this->verify_not_sink(left);
       Expression* right = this->expression(right_precedence, false,
@@ -3638,7 +3815,18 @@ Parse::unary_expr(bool may_be_sink, bool may_be_composite_lit,
     {
       Location location = token->location();
       Operator op = token->op();
-      this->advance_token();
+
+      if (op == OPERATOR_MULT)
+        {
+	  this->advance_token();
+	  const Token* maybesemi = this->peek_token();
+	  if (maybesemi->is_op(OPERATOR_SEMICOLON))
+	    {
+              this->advance_token();
+	    }
+        }
+      else
+        this->advance_token();
 
       Expression* expr = this->unary_expr(false, may_be_composite_lit, NULL,
 					  NULL);
@@ -4205,6 +4393,7 @@ Parse::tuple_assignment(Expression_list* lhs, bool may_be_composite_lit,
 	{
 	  if (op == OPERATOR_EQ)
 	    s = Statement::make_assignment(lhs->front(), vals->front(),
+					   this->gogo_->lookup("Sizeofgeneric", NULL),
 					   location);
 	  else
 	    s = Statement::make_assignment_operation(op, lhs->front(),

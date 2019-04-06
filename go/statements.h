@@ -150,7 +150,7 @@ class Statement
 
   // Make an assignment statement.
   static Assignment_statement*
-  make_assignment(Expression*, Expression*, Location);
+  make_assignment(Expression*, Expression*, Named_object*, Location);
 
   // Make an assignment operation (+=, etc.).
   static Statement*
@@ -594,9 +594,11 @@ class Assignment_statement : public Statement
 {
  public:
   Assignment_statement(Expression* lhs, Expression* rhs,
+                       Named_object* sizeofgeneric,
 		       Location location)
     : Statement(STATEMENT_ASSIGNMENT, location),
-      lhs_(lhs), rhs_(rhs), omit_write_barrier_(false)
+      lhs_(lhs), rhs_(rhs), omit_write_barrier_(false),
+      sizeofgeneric_(sizeofgeneric)
   { }
 
   Expression*
@@ -652,8 +654,12 @@ class Assignment_statement : public Statement
   Expression* lhs_;
   // Right hand side--the rvalue.
   Expression* rhs_;
+
   // True if we can omit a write barrier from this assignment.
   bool omit_write_barrier_;
+
+  // Variable holding the size of the element
+  Named_object* sizeofgeneric_;
 };
 
 // A statement which creates and initializes a temporary variable.

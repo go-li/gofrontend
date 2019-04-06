@@ -171,10 +171,10 @@ class Parse
   Type* pointer_type();
   Type* channel_type();
   void check_signature_names(const Typed_identifier_list*, Names*);
-  Function_type* signature(Typed_identifier*, Location);
-  bool parameters(Typed_identifier_list**, bool* is_varargs);
-  Typed_identifier_list* parameter_list(bool* is_varargs);
-  void parameter_decl(bool, Typed_identifier_list*, bool*, bool*, bool*);
+  Function_type* signature(Typed_identifier*, Location, bool);
+  bool parameters(Typed_identifier_list**, bool* is_varargs, bool* is_pmorph);
+  Typed_identifier_list* parameter_list(bool* is_varargs, bool* is_pmorph);
+  void parameter_decl(bool, Typed_identifier_list*, bool*, bool*, bool*, bool*);
   bool result(Typed_identifier_list**);
   Location block();
   Type* interface_type(bool record);
@@ -317,6 +317,8 @@ class Parse
   // References from the local function to variables defined in
   // enclosing functions.
   Enclosing_vars enclosing_vars_;
+  // Early sizeof generic references, to the generic type descriptor parameter.
+  std::vector<Named_object**> early_sizeofgeneric_references_;
 };
 
 

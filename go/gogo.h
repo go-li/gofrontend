@@ -544,6 +544,11 @@ class Gogo
   current_file_imported_unsafe() const
   { return this->current_file_imported_unsafe_; }
 
+  // Return whether we imported the unsafe package.
+  bool
+  imported_unsafe() const
+  { return this->imported_unsafe_; }
+
   // Clear out all names in file scope.  This is called when we start
   // parsing a new file.
   void
@@ -896,6 +901,14 @@ class Gogo
   static bool
   is_special_name(const std::string& name);
 
+  // Smuggle a Named_object argument using a Gogo argument
+  Gogo*
+  smuggle(Named_object* sizeofgeneric);
+
+  // Retrieve a smuggled Named_object
+  Named_object*
+  get_sizeofgeneric();
+
  private:
   // During parsing, we keep a stack of functions.  Each function on
   // the stack is one that we are currently parsing.  For each
@@ -1088,6 +1101,8 @@ class Gogo
   // A list of functions that we want to inline.  These will be sent
   // to the backend.
   std::vector<Named_object*> imported_inline_functions_;
+  // A sizeofgeneric argument we are smuggling
+  Named_object *sizeofgeneric_;
 };
 
 // A block of statements.
@@ -1208,7 +1223,7 @@ class Block
 class Function
 {
  public:
-  Function(Function_type* type, Named_object*, Block*, Location);
+  Function(Function_type* type, Named_object*, Block*, bool, Location);
 
   // Return the function's type.
   Function_type*
@@ -1253,6 +1268,10 @@ class Function
   void
   set_is_sink()
   { this->is_sink_ = true; }
+
+  bool
+  is_parent_generic() const
+  { return this->parent_generic_; }
 
   // Whether the result variables have names.
   bool
@@ -1525,7 +1544,7 @@ class Function
   import_func(Import*, std::string* pname, Typed_identifier** receiver,
 	      Typed_identifier_list** pparameters,
 	      Typed_identifier_list** presults, bool* is_varargs,
-	      bool* nointerface, std::string* body);
+	      bool* is_generic, bool* nointerface, std::string* body);
 
  private:
   // Type for mapping from label names to Label objects.
@@ -1602,6 +1621,8 @@ class Function
   // True if this function is inline only: if it should not be emitted
   // if it is not inlined.
   bool is_inline_only_ : 1;
+  // Any parent is generic.
+  bool parent_generic_;
 };
 
 // A snapshot of the current binding state.

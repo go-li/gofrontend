@@ -196,13 +196,26 @@ Mark_address_taken::expression(Expression** pexpr)
               Type* array_type = Type::make_array_type(elmt_type, len_expr);
               Expression* alloc = Expression::make_allocation(array_type, loc);
               alloc->allocation_expression()->set_allocate_on_stack();
-	      Type* ptr_type = Type::make_pointer_type(elmt_type);
-	      Expression* ptr = Expression::make_unsafe_cast(ptr_type, alloc,
-							     loc);
-	      Expression* slice =
-		Expression::make_slice_value(expr->type(), ptr, len_arg,
-					     cap_arg, loc);
-              *pexpr = slice;
+
+              if (elmt_type->is_void_type())
+                {
+                  Expression* array = Expression::make_unary(OPERATOR_MULT, alloc, loc);
+                  Expression* zero = Expression::make_integer_ul(0, len_arg->type(), loc);
+                  Expression* slice =
+			Expression::make_array_index(array, zero, len_arg, cap_arg, gogo_->get_sizeofgeneric(), loc);
+                  *pexpr = slice;
+                }
+              else
+                {
+	          Type* ptr_type = Type::make_pointer_type(elmt_type);
+	          Expression* ptr = Expression::make_unsafe_cast(ptr_type, alloc,
+								 loc);
+	          Expression* slice = Expression::make_slice_value(expr->type(),
+								   ptr, len_arg,
+								   cap_arg, loc);
+                  *pexpr = slice;
+                }
+
             }
         }
     }
@@ -825,7 +838,7 @@ Gogo::assign_with_write_barrier(Function* function, Block* enclosing,
       inserter->insert(temp);
       rhs = Expression::make_temporary_reference(temp, loc);
     }
-  rhs = Expression::convert_for_assignment(this, type, rhs, loc);
+  rhs = rhs->convert_for_assignment(this, type, rhs, loc);
   Temporary_statement* rhs_temp = NULL;
   if (!rhs->is_variable() && !rhs->is_constant())
     {
@@ -836,13 +849,13 @@ Gogo::assign_with_write_barrier(Function* function, Block* enclosing,
 
   Expression* indir =
       Expression::make_dereference(lhs, Expression::NIL_CHECK_DEFAULT, loc);
-  Statement* assign = Statement::make_assignment(indir, rhs, loc);
+  Statement* assign = Statement::make_assignment(indir, rhs, NULL, loc);
 
   lhs = Expression::make_temporary_reference(lhs_temp, loc);
   if (rhs_temp != NULL)
     rhs = Expression::make_temporary_reference(rhs_temp, loc);
 
-  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_ptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   lhs = Expression::make_unsafe_cast(unsafe_ptr_type, lhs, loc);
 
   Expression* call;
@@ -896,7 +909,7 @@ Gogo::check_write_barrier(Block* enclosing, Statement* without,
   Named_object* wb = this->write_barrier_variable();
   // We pretend that writeBarrier is a uint32, so that we do a
   // 32-bit load.  That is what the gc toolchain does.
-  Type* void_type = Type::make_void_type();
+  Type* void_type = Type::make_void_type(NULL, NULL);
   Type* unsafe_pointer_type = Type::make_pointer_type(void_type);
   Type* uint32_type = Type::lookup_integer_type("uint32");
   Type* puint32_type = Type::make_pointer_type(uint32_type);

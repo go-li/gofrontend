@@ -159,7 +159,7 @@ Statement::import_statement(Import_function_body* ifb, Location loc)
   Expression* lhs = Expression::import_expression(ifb, loc);
   ifb->require_c_string(" = ");
   Expression* rhs = Expression::import_expression(ifb, loc);
-  return Statement::make_assignment(lhs, rhs, loc);
+  return Statement::make_assignment(lhs, rhs, NULL, loc);
 }
 
 // If this is a thunk statement, return it.
@@ -548,7 +548,7 @@ Temporary_statement::do_get_backend(Translate_context* context)
     binit = this->init_->get_backend(context);
   else
     {
-      Expression* init = Expression::convert_for_assignment(context->gogo(),
+      Expression* init = this->init_->convert_for_assignment(context->gogo(),
 							    this->type_,
 							    this->init_,
 							    this->location());
@@ -733,7 +733,7 @@ Assignment_statement::do_traverse_assignments(Traverse_assignments* tassign)
 // call.  Mark some slice assignments as not requiring a write barrier.
 
 Statement*
-Assignment_statement::do_lower(Gogo*, Named_object*, Block* enclosing,
+Assignment_statement::do_lower(Gogo* gogo, Named_object*, Block* enclosing,
 			       Statement_inserter*)
 {
   Map_index_expression* mie = this->lhs_->map_index_expression();
@@ -789,7 +789,7 @@ Assignment_statement::do_lower(Gogo*, Named_object*, Block* enclosing,
           Expression::make_dereference(call, Expression::NIL_CHECK_NOT_NEEDED,
                                        loc);
       ref = Expression::make_temporary_reference(val_temp, loc);
-      b->add_statement(Statement::make_assignment(indir, ref, loc));
+      b->add_statement(Statement::make_assignment(indir, ref, gogo->lookup("Sizeofgeneric", NULL), loc));
 
       return Statement::make_block_statement(b, loc);
     }
@@ -828,7 +828,7 @@ Assignment_statement::do_determine_types()
 // Check types for an assignment.
 
 void
-Assignment_statement::do_check_types(Gogo*)
+Assignment_statement::do_check_types(Gogo* gogo)
 {
   // The left hand side must be either addressable, a map index
   // expression, or the blank identifier.
@@ -855,12 +855,71 @@ Assignment_statement::do_check_types(Gogo*)
   std::string reason;
   if (!Type::are_assignable(lhs_type, rhs_type, &reason))
     {
-      if (reason.empty())
-	go_error_at(this->location(), "incompatible types in assignment");
-      else
-	go_error_at(this->location(), "incompatible types in assignment (%s)",
-		    reason.c_str());
+
+      if (lhs_type->is_void_type() && rhs_type->is_void_type()) {
+        Named_object* sizeofg = this->sizeofgeneric_;
+        if (sizeofg == NULL) {
+          go_error_at(this->location(), "sizeofgeneric is null");
+          this->set_is_error();
+          return;
+        }
+
+        Expression* lx = this->lhs_;
+        Expression* rx = this->rhs_;
+        int n = 0;
+        while ((lx != lx->deref()) && (rx != rx->deref())) {
+          lx = lx->deref();
+          rx = rx->deref();
+          n++;
+        }
+
+	if ((lx->var_expression() != NULL) && (rx->var_expression() != NULL)) {
+
+          Named_object* lhn =  lx->var_expression()->named_object();
+          Named_object* rhn =  rx->var_expression()->named_object();
+
+          Expression* lptr = Expression::make_var_reference(lhn, this->location());
+          Expression* rptr = Expression::make_var_reference(rhn, this->location());
+
+          for (int i = 1; i < n; i++) {
+            lptr = Expression::make_unary(OPERATOR_MULT, lptr, this->location());
+            rptr = Expression::make_unary(OPERATOR_MULT, rptr, this->location());
+          }
+
+          Type* safe_ptr_type = Type::make_pointer_type(Type::lookup_integer_type("uintptr"));
+          Expression* sz = Expression::make_dereference(Expression::make_unsafe_cast(safe_ptr_type,
+                                                                                     Expression::make_var_reference(sizeofg, this->location()), this->location()),
+                                                        Expression::NIL_CHECK_NOT_NEEDED, this->location());
+
+
+          Expression* call = Runtime::make_call(Runtime::COPY, this->location(), 3, lptr, rptr, sz);
+
+          // now create right-side sink
+          this->lhs_ = Expression::make_sink(this->location());
+
+          this->rhs_ = call;
+
+
+	} else {
+          if (reason.empty())
+            go_error_at(this->location(), "incompatible types in assignment");
+          else
+            go_error_at(this->location(), "incompatible types in assignment (%s)",
+                        reason.c_str());
       this->set_is_error();
+    }
+
+      } else {
+
+
+        if (reason.empty())
+          go_error_at(this->location(), "incompatible types in assignment");
+        else
+          go_error_at(this->location(), "incompatible types in assignment (%s)",
+                      reason.c_str());
+        this->set_is_error();
+      }
+
     }
 
   if (lhs_type->is_error() || rhs_type->is_error())
@@ -921,7 +980,7 @@ Assignment_statement::do_get_backend(Translate_context* context)
 
   Bexpression* lhs = this->lhs_->get_backend(context);
   Expression* conv =
-      Expression::convert_for_assignment(context->gogo(), this->lhs_->type(),
+      this->rhs_->convert_for_assignment(context->gogo(), this->lhs_->type(),
                                          this->rhs_, this->location());
   Bexpression* rhs = conv->get_backend(context);
   Bfunction* bfunction = context->function()->func_value()->get_decl();
@@ -946,9 +1005,10 @@ Assignment_statement::do_dump_statement(Ast_dump_context* ast_dump_context)
 
 Assignment_statement*
 Statement::make_assignment(Expression* lhs, Expression* rhs,
+			   Named_object* sizeofgeneric,
 			   Location location)
 {
-  return new Assignment_statement(lhs, rhs, location);
+  return new Assignment_statement(lhs, rhs, sizeofgeneric, location);
 }
 
 // An assignment operation statement.
@@ -1003,7 +1063,7 @@ Assignment_operation_statement::do_traverse(Traverse* traverse)
 // statement.
 
 Statement*
-Assignment_operation_statement::do_lower(Gogo*, Named_object*,
+Assignment_operation_statement::do_lower(Gogo* gogo, Named_object*,
 					 Block* enclosing, Statement_inserter*)
 {
   Location loc = this->location();
@@ -1057,7 +1117,7 @@ Assignment_operation_statement::do_lower(Gogo*, Named_object*,
     }
 
   Expression* binop = Expression::make_binary(op, lval, this->rhs_, loc);
-  Statement* s = Statement::make_assignment(this->lhs_, binop, loc);
+  Statement* s = Statement::make_assignment(this->lhs_, binop, gogo->lookup("Sizeofgeneric", NULL), loc);
   if (b->statements()->empty())
     {
       delete b;
@@ -1144,7 +1204,7 @@ Tuple_assignment_statement::do_traverse(Traverse* traverse)
 // up into a set of single assignments.
 
 Statement*
-Tuple_assignment_statement::do_lower(Gogo*, Named_object*, Block* enclosing,
+Tuple_assignment_statement::do_lower(Gogo* gogo, Named_object*, Block* enclosing,
 				     Statement_inserter*)
 {
   Location loc = this->location();
@@ -1208,7 +1268,7 @@ Tuple_assignment_statement::do_lower(Gogo*, Named_object*, Block* enclosing,
 	continue;
 
       Expression* ref = Expression::make_temporary_reference(*ptemp, loc);
-      b->add_statement(Statement::make_assignment(*plhs, ref, loc));
+      b->add_statement(Statement::make_assignment(*plhs, ref, gogo->lookup("Sizeofgeneric", NULL), loc));
       ++ptemp;
     }
   go_assert(ptemp == temps.end() || saw_errors());
@@ -1353,24 +1413,24 @@ Tuple_map_assignment_statement::do_lower(Gogo* gogo, Named_object*,
   ref->set_is_lvalue();
   Expression* res = Expression::make_call_result(call, 0);
   res = Expression::make_unsafe_cast(val_ptr_type, res, loc);
-  Statement* s = Statement::make_assignment(ref, res, loc);
+  Statement* s = Statement::make_assignment(ref, res, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
   ref = Expression::make_temporary_reference(present_temp, loc);
   ref->set_is_lvalue();
   res = Expression::make_call_result(call, 1);
-  s = Statement::make_assignment(ref, res, loc);
+  s = Statement::make_assignment(ref, res, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   // val = *val__ptr_temp
   ref = Expression::make_temporary_reference(val_ptr_temp, loc);
   Expression* ind =
       Expression::make_dereference(ref, Expression::NIL_CHECK_NOT_NEEDED, loc);
-  s = Statement::make_assignment(this->val_, ind, loc);
+  s = Statement::make_assignment(this->val_, ind, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   // present = present_temp
   ref = Expression::make_temporary_reference(present_temp, loc);
-  s = Statement::make_assignment(this->present_, ref, loc);
+  s = Statement::make_assignment(this->present_, ref, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   return Statement::make_block_statement(b, loc);
@@ -1453,7 +1513,7 @@ Tuple_receive_assignment_statement::do_traverse(Traverse* traverse)
 // Lower to a function call.
 
 Statement*
-Tuple_receive_assignment_statement::do_lower(Gogo*, Named_object*,
+Tuple_receive_assignment_statement::do_lower(Gogo* gogo, Named_object*,
 					     Block* enclosing,
 					     Statement_inserter*)
 {
@@ -1500,17 +1560,17 @@ Tuple_receive_assignment_statement::do_lower(Gogo*, Named_object*,
 					loc, 2, this->channel_, p2);
   ref = Expression::make_temporary_reference(closed_temp, loc);
   ref->set_is_lvalue();
-  Statement* s = Statement::make_assignment(ref, call, loc);
+  Statement* s = Statement::make_assignment(ref, call, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   // val = val_temp
   ref = Expression::make_temporary_reference(val_temp, loc);
-  s = Statement::make_assignment(this->val_, ref, loc);
+  s = Statement::make_assignment(this->val_, ref, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   // closed = closed_temp
   ref = Expression::make_temporary_reference(closed_temp, loc);
-  s = Statement::make_assignment(this->closed_, ref, loc);
+  s = Statement::make_assignment(this->closed_, ref, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   return Statement::make_block_statement(b, loc);
@@ -1605,7 +1665,7 @@ Tuple_type_guard_assignment_statement::do_traverse(Traverse* traverse)
 // Lower to a function call.
 
 Statement*
-Tuple_type_guard_assignment_statement::do_lower(Gogo*, Named_object*,
+Tuple_type_guard_assignment_statement::do_lower(Gogo* gogo, Named_object*,
 						Block* enclosing,
 						Statement_inserter*)
 {
@@ -1658,11 +1718,11 @@ Tuple_type_guard_assignment_statement::do_lower(Gogo*, Named_object*,
     {
       Expression* res = Expression::make_call_result(call, 0);
       res = Expression::make_unsafe_cast(this->type_, res, loc);
-      Statement* s = Statement::make_assignment(this->val_, res, loc);
+      Statement* s = Statement::make_assignment(this->val_, res, gogo->lookup("Sizeofgeneric", NULL), loc);
       b->add_statement(s);
 
       res = Expression::make_call_result(call, 1);
-      s = Statement::make_assignment(this->ok_, res, loc);
+      s = Statement::make_assignment(this->ok_, res, gogo->lookup("Sizeofgeneric", NULL), loc);
       b->add_statement(s);
     }
 
@@ -1699,12 +1759,12 @@ Tuple_type_guard_assignment_statement::lower_to_object_type(
   Expression* ref = Expression::make_temporary_reference(val_temp, loc);
   Expression* p3 = Expression::make_unary(OPERATOR_AND, ref, loc);
   Expression* call = Runtime::make_call(code, loc, 3, p1, this->expr_, p3);
-  Statement* s = Statement::make_assignment(this->ok_, call, loc);
+  Statement* s = Statement::make_assignment(this->ok_, call, NULL, loc);
   b->add_statement(s);
 
   // val = val_temp
   ref = Expression::make_temporary_reference(val_temp, loc);
-  s = Statement::make_assignment(this->val_, ref, loc);
+  s = Statement::make_assignment(this->val_, ref, NULL, loc);
   b->add_statement(s);
 }
 
@@ -2738,7 +2798,7 @@ Return_statement::do_traverse_assignments(Traverse_assignments* tassign)
 // return.  This lets panic/recover work correctly.
 
 Statement*
-Return_statement::do_lower(Gogo*, Named_object* function, Block* enclosing,
+Return_statement::do_lower(Gogo* gogo, Named_object* function, Block* enclosing,
 			   Statement_inserter*)
 {
   if (this->is_lowered_)
@@ -2845,6 +2905,7 @@ Return_statement::do_lower(Gogo*, Named_object* function, Block* enclosing,
   else if (lhs->size() == 1)
     {
       b->add_statement(Statement::make_assignment(lhs->front(), rhs->front(),
+						  gogo->lookup("Sizeofgeneric", NULL),
 						  loc));
       delete lhs;
       delete rhs;
@@ -4294,7 +4355,7 @@ Type_switch_statement::do_traverse(Traverse* traverse)
 // equality testing.
 
 Statement*
-Type_switch_statement::do_lower(Gogo*, Named_object*, Block* enclosing,
+Type_switch_statement::do_lower(Gogo* gogo, Named_object*, Block* enclosing,
 				Statement_inserter*)
 {
   const Location loc = this->location();
@@ -4328,7 +4389,7 @@ Type_switch_statement::do_lower(Gogo*, Named_object*, Block* enclosing,
   Temporary_reference_expression* lhs =
     Expression::make_temporary_reference(descriptor_temp, loc);
   lhs->set_is_lvalue();
-  Statement* s = Statement::make_assignment(lhs, call, loc);
+  Statement* s = Statement::make_assignment(lhs, call, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   if (this->clauses_ != NULL)
@@ -4492,7 +4553,7 @@ Send_statement::do_get_backend(Translate_context* context)
 
   Channel_type* channel_type = this->channel_->type()->channel_type();
   Type* element_type = channel_type->element_type();
-  Expression* val = Expression::convert_for_assignment(context->gogo(),
+  Expression* val = this->val_->convert_for_assignment(context->gogo(),
 						       element_type,
 						       this->val_, loc);
 
@@ -4641,7 +4702,7 @@ Select_clauses::Select_clause::lower(Gogo* gogo, Named_object* function,
 
   Expression* scase = Expression::make_temporary_reference(scases, loc);
   Expression* index_expr = Expression::make_integer_ul(index, NULL, loc);
-  scase = Expression::make_array_index(scase, index_expr, NULL, NULL, loc);
+  scase = Expression::make_array_index(scase, index_expr, NULL, NULL, gogo->get_sizeofgeneric(), loc);
 
   if (this->is_default_)
     {
@@ -4707,7 +4768,7 @@ Select_clauses::Select_clause::lower_send(Block* b, Expression* scase,
 
   Expression* valref = Expression::make_temporary_reference(val, loc);
   Expression* valaddr = Expression::make_unary(OPERATOR_AND, valref, loc);
-  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   valaddr = Expression::make_cast(unsafe_pointer_type, valaddr, loc);
 
   this->set_case(b, scase, chanref, valaddr, caseSend);
@@ -4733,7 +4794,7 @@ Select_clauses::Select_clause::lower_recv(Gogo* gogo, Named_object* function,
 
   Expression* valref = Expression::make_temporary_reference(val, loc);
   Expression* valaddr = Expression::make_unary(OPERATOR_AND, valref, loc);
-  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   valaddr = Expression::make_cast(unsafe_pointer_type, valaddr, loc);
 
   this->set_case(b, scase, chanref, valaddr, caseRecv);
@@ -4755,7 +4816,7 @@ Select_clauses::Select_clause::lower_recv(Gogo* gogo, Named_object* function,
     {
       init = new Block(b, loc);
       valref = Expression::make_temporary_reference(val, loc);
-      init->add_statement(Statement::make_assignment(this->val_, valref, loc));
+      init->add_statement(Statement::make_assignment(this->val_, valref, gogo->lookup("Sizeofgeneric", NULL), loc));
     }
 
   if (this->closedvar_ != NULL)
@@ -4770,6 +4831,7 @@ Select_clauses::Select_clause::lower_recv(Gogo* gogo, Named_object* function,
 	init = new Block(b, loc);
       Expression* cref = Expression::make_temporary_reference(recvok, loc);
       init->add_statement(Statement::make_assignment(this->closed_, cref,
+						     gogo->lookup("Sizeofgeneric", NULL),
 						     loc));
     }
 
@@ -4800,9 +4862,9 @@ Select_clauses::Select_clause::set_case(Block* b,
   int field_index = 0;
   go_assert(scase_type->field(field_index)->is_field_name("c"));
   Expression* ref = Expression::make_field_reference(scase, field_index, loc);
-  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   chanref = Expression::make_unsafe_cast(unsafe_pointer_type, chanref, loc);
-  Statement* s = Statement::make_assignment(ref, chanref, loc);
+  Statement* s = Statement::make_assignment(ref, chanref, NULL, loc);
   b->add_statement(s);
 
   if (elem != NULL)
@@ -4810,7 +4872,7 @@ Select_clauses::Select_clause::set_case(Block* b,
       field_index = 1;
       go_assert(scase_type->field(field_index)->is_field_name("elem"));
       ref = Expression::make_field_reference(scase->copy(), field_index, loc);
-      s = Statement::make_assignment(ref, elem, loc);
+      s = Statement::make_assignment(ref, elem, NULL, loc);
       b->add_statement(s);
     }
 
@@ -4819,7 +4881,7 @@ Select_clauses::Select_clause::set_case(Block* b,
   Type* uint16_type = Type::lookup_integer_type("uint16");
   Expression* k = Expression::make_integer_ul(kind, uint16_type, loc);
   ref = Expression::make_field_reference(scase->copy(), field_index, loc);
-  s = Statement::make_assignment(ref, k, loc);
+  s = Statement::make_assignment(ref, k, NULL, loc);
   b->add_statement(s);
 }
 
@@ -5132,7 +5194,7 @@ Select_statement::do_lower(Gogo* gogo, Named_object* function,
 
   Expression* scases_ref = Expression::make_temporary_reference(scases, loc);
   scases_ref = Expression::make_unary(OPERATOR_AND, scases_ref, loc);
-  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type());
+  Type* unsafe_pointer_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   scases_ref = Expression::make_cast(unsafe_pointer_type, scases_ref, loc);
 
   Expression* order_ref = Expression::make_temporary_reference(order, loc);
@@ -5147,12 +5209,12 @@ Select_statement::do_lower(Gogo* gogo, Named_object* function,
 
   Expression* result = Expression::make_call_result(call, 0);
   Expression* ref = Expression::make_temporary_reference(this->index_, loc);
-  Statement* s = Statement::make_assignment(ref, result, loc);
+  Statement* s = Statement::make_assignment(ref, result, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   result = Expression::make_call_result(call, 1);
   ref = Expression::make_temporary_reference(recvok, loc);
-  s = Statement::make_assignment(ref, result, loc);
+  s = Statement::make_assignment(ref, result, gogo->lookup("Sizeofgeneric", NULL), loc);
   b->add_statement(s);
 
   this->is_lowered_ = true;
@@ -5558,7 +5620,7 @@ For_range_statement::do_lower(Gogo* gogo, Named_object*, Block* enclosing,
       Expression* index_ref =
 	Expression::make_temporary_reference(index_temp, loc);
       if (this->value_var_ == NULL || this->value_var_->is_sink_expression())
-	assign = Statement::make_assignment(this->index_var_, index_ref, loc);
+	assign = Statement::make_assignment(this->index_var_, index_ref, gogo->lookup("Sizeofgeneric", NULL), loc);
       else
 	{
 	  Expression_list* lhs = new Expression_list();
@@ -5675,7 +5737,7 @@ For_range_statement::lower_range_array(Gogo* gogo,
   Temporary_reference_expression* tref =
     Expression::make_temporary_reference(index_temp, loc);
   tref->set_is_lvalue();
-  Statement* s = Statement::make_assignment(tref, zexpr, loc);
+  Statement* s = Statement::make_assignment(tref, zexpr, gogo->lookup("Sizeofgeneric", NULL), loc);
   init->add_statement(s);
 
   *pinit = init;
@@ -5699,11 +5761,11 @@ For_range_statement::lower_range_array(Gogo* gogo,
 
       ref = Expression::make_temporary_reference(range_temp, loc);
       Expression* ref2 = Expression::make_temporary_reference(index_temp, loc);
-      Expression* index = Expression::make_index(ref, ref2, NULL, NULL, loc);
+      Expression* index = Expression::make_index(gogo, ref, ref2, NULL, NULL, loc);
 
       tref = Expression::make_temporary_reference(value_temp, loc);
       tref->set_is_lvalue();
-      s = Statement::make_assignment(tref, index, loc);
+      s = Statement::make_assignment(tref, index, gogo->lookup("Sizeofgeneric", NULL), loc);
 
       iter_init->add_statement(s);
     }
@@ -5730,10 +5792,10 @@ For_range_statement::lower_range_slice(Gogo* gogo,
 				       Temporary_statement* range_temp,
 				       Temporary_statement* index_temp,
 				       Temporary_statement* value_temp,
-				       Block** pinit,
-				       Expression** pcond,
-				       Block** piter_init,
-				       Block** ppost)
+					Block** pinit,
+					Expression** pcond,
+					Block** piter_init,
+					Block** ppost)
 {
   Location loc = this->location();
 
@@ -5773,7 +5835,7 @@ For_range_statement::lower_range_slice(Gogo* gogo,
   Temporary_reference_expression* tref =
     Expression::make_temporary_reference(index_temp, loc);
   tref->set_is_lvalue();
-  Statement* s = Statement::make_assignment(tref, zexpr, loc);
+  Statement* s = Statement::make_assignment(tref, zexpr, gogo->lookup("Sizeofgeneric", NULL), loc);
   init->add_statement(s);
 
   *pinit = init;
@@ -5797,11 +5859,11 @@ For_range_statement::lower_range_slice(Gogo* gogo,
 
       ref = Expression::make_temporary_reference(for_temp, loc);
       Expression* ref2 = Expression::make_temporary_reference(index_temp, loc);
-      Expression* index = Expression::make_index(ref, ref2, NULL, NULL, loc);
+      Expression* index = Expression::make_index(gogo, ref, ref2, NULL, NULL, loc);
 
       tref = Expression::make_temporary_reference(value_temp, loc);
       tref->set_is_lvalue();
-      s = Statement::make_assignment(tref, index, loc);
+      s = Statement::make_assignment(tref, index, gogo->lookup("Sizeofgeneric", NULL), loc);
 
       iter_init->add_statement(s);
     }
@@ -5828,10 +5890,10 @@ For_range_statement::lower_range_string(Gogo* gogo,
 					Temporary_statement* range_temp,
 					Temporary_statement* index_temp,
 					Temporary_statement* value_temp,
-					Block** pinit,
-					Expression** pcond,
-					Block** piter_init,
-					Block** ppost)
+				     Block** pinit,
+				     Expression** pcond,
+				     Block** piter_init,
+				     Block** ppost)
 {
   Location loc = this->location();
 
@@ -5872,7 +5934,7 @@ For_range_statement::lower_range_string(Gogo* gogo,
     Expression::make_temporary_reference(index_temp, loc);
   index_ref->set_is_lvalue();
   Expression* zexpr = Expression::make_integer_ul(0, index_temp->type(), loc);
-  Statement* s = Statement::make_assignment(index_ref, zexpr, loc);
+  Statement* s = Statement::make_assignment(index_ref, zexpr, gogo->lookup("Sizeofgeneric", NULL), loc);
   init->add_statement(s);
 
   Type* rune_type;
@@ -5912,7 +5974,7 @@ For_range_statement::lower_range_string(Gogo* gogo,
   Temporary_reference_expression* value_ref =
     Expression::make_temporary_reference(value_temp, loc);
   value_ref->set_is_lvalue();
-  s = Statement::make_assignment(value_ref, ref, loc);
+  s = Statement::make_assignment(value_ref, ref, gogo->lookup("Sizeofgeneric", NULL), loc);
   iter_init->add_statement(s);
 
   value_ref = Expression::make_temporary_reference(value_temp, loc);
@@ -5929,7 +5991,7 @@ For_range_statement::lower_range_string(Gogo* gogo,
   Expression* one = Expression::make_integer_ul(1, index_temp->type(), loc);
   Expression* sum = Expression::make_binary(OPERATOR_PLUS, index_ref, one,
 					    loc);
-  s = Statement::make_assignment(lhs, sum, loc);
+  s = Statement::make_assignment(lhs, sum, gogo->lookup("Sizeofgeneric", NULL), loc);
   then_block->add_statement(s);
 
   Block* else_block = new Block(iter_init, loc);
@@ -5941,13 +6003,13 @@ For_range_statement::lower_range_string(Gogo* gogo,
   value_ref = Expression::make_temporary_reference(value_temp, loc);
   value_ref->set_is_lvalue();
   Expression* res = Expression::make_call_result(call, 0);
-  s = Statement::make_assignment(value_ref, res, loc);
+  s = Statement::make_assignment(value_ref, res, gogo->lookup("Sizeofgeneric", NULL), loc);
   else_block->add_statement(s);
 
   lhs = Expression::make_temporary_reference(next_index_temp, loc);
   lhs->set_is_lvalue();
   res = Expression::make_call_result(call, 1);
-  s = Statement::make_assignment(lhs, res, loc);
+  s = Statement::make_assignment(lhs, res, gogo->lookup("Sizeofgeneric", NULL), loc);
   else_block->add_statement(s);
 
   s = Statement::make_if_statement(cond, then_block, else_block, loc);
@@ -5963,7 +6025,7 @@ For_range_statement::lower_range_string(Gogo* gogo,
   index_ref = Expression::make_temporary_reference(index_temp, loc);
   index_ref->set_is_lvalue();
   ref = Expression::make_temporary_reference(next_index_temp, loc);
-  s = Statement::make_assignment(index_ref, ref, loc);
+  s = Statement::make_assignment(index_ref, ref, gogo->lookup("Sizeofgeneric", NULL), loc);
 
   post->add_statement(s);
   *ppost = post;
@@ -5980,10 +6042,10 @@ For_range_statement::lower_range_map(Gogo* gogo,
 				     Temporary_statement* range_temp,
 				     Temporary_statement* index_temp,
 				     Temporary_statement* value_temp,
-				     Block** pinit,
-				     Expression** pcond,
-				     Block** piter_init,
-				     Block** ppost)
+					 Block** pinit,
+					 Expression** pcond,
+					 Block** piter_init,
+					 Block** ppost)
 {
   Location loc = this->location();
 
@@ -6042,7 +6104,7 @@ For_range_statement::lower_range_map(Gogo* gogo,
   rhs = Expression::make_field_reference(ref, 0, loc);
   rhs = Expression::make_dereference(ref, Expression::NIL_CHECK_NOT_NEEDED,
                                      loc);
-  Statement* set = Statement::make_assignment(lhs, rhs, loc);
+  Statement* set = Statement::make_assignment(lhs, rhs, gogo->lookup("Sizeofgeneric", NULL), loc);
   iter_init->add_statement(set);
 
   if (value_temp != NULL)
@@ -6052,7 +6114,7 @@ For_range_statement::lower_range_map(Gogo* gogo,
       rhs = Expression::make_field_reference(rhs, 1, loc);
       rhs = Expression::make_dereference(rhs, Expression::NIL_CHECK_NOT_NEEDED,
                                          loc);
-      set = Statement::make_assignment(lhs, rhs, loc);
+      set = Statement::make_assignment(lhs, rhs, gogo->lookup("Sizeofgeneric", NULL), loc);
       iter_init->add_statement(set);
     }
 

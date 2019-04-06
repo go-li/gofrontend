@@ -288,6 +288,11 @@ class Expression
   static Expression*
   make_iota();
 
+  // Actually make a call expression.
+  static Call_expression*
+  actually_make_call(Gogo* gogo, Expression* func, Expression_list* args, bool is_varargs,
+                     Location);
+
   // Make a call expression.
   static Call_expression*
   make_call(Expression* func, Expression_list* args, bool is_varargs,
@@ -312,7 +317,7 @@ class Expression
   // After parsing this is lowered to an array index, a string index,
   // or a map index.
   static Expression*
-  make_index(Expression* left, Expression* start, Expression* end,
+  make_index(Gogo* gogo, Expression* left, Expression* start, Expression* end,
              Expression* cap, Location);
 
   // Make an array index expression.  END may be NULL, in which case
@@ -320,7 +325,7 @@ class Expression
   // to cap(ARRAY).
   static Expression*
   make_array_index(Expression* array, Expression* start, Expression* end,
-                   Expression* cap, Location);
+                   Expression* cap, Named_object* sizeofgeneric, Location);
 
   // Make a string index expression.  END may be NULL.  This is never
   // an lvalue.
@@ -993,14 +998,14 @@ class Expression
 
   // Return an expression handling any conversions which must be done during
   // assignment.
-  static Expression*
+  Expression*
   convert_for_assignment(Gogo*, Type* lhs_type, Expression* rhs,
                          Location location);
 
   // Return an expression converting a value of one interface type to another
   // interface type.  If FOR_TYPE_GUARD is true this is for a type
   // assertion.
-  static Expression*
+  Expression*
   convert_interface_to_interface(Type* lhs_type,
                                  Expression* rhs, bool for_type_guard,
                                  Location);
@@ -2177,13 +2182,15 @@ class Call_expression : public Expression
 {
  public:
   Call_expression(Expression* fn, Expression_list* args, bool is_varargs,
+		  Named_object* sizeofgeneric,
 		  Location location)
     : Expression(EXPRESSION_CALL, location),
       fn_(fn), args_(args), type_(NULL), call_(NULL), call_temp_(NULL)
     , expected_result_count_(0), is_varargs_(is_varargs),
       varargs_are_lowered_(false), types_are_determined_(false),
       is_deferred_(false), is_concurrent_(false), issued_error_(false),
-      is_multi_value_arg_(false), is_flattened_(false)
+      is_multi_value_arg_(false), is_flattened_(false), wildcard_type_(NULL),
+      sizeofgeneric_(sizeofgeneric)
   { }
 
   // The function to call.
@@ -2294,6 +2301,20 @@ class Call_expression : public Expression
   inline Builtin_call_expression*
   builtin_call_expression();
 
+  Type**
+  get_wildcard_type()
+  { return (this == NULL) ? NULL : &this->wildcard_type_; }
+
+  Named_object*
+  get_sizeofgeneric() {
+    return (this == NULL) ? NULL : this->sizeofgeneric_;
+  }
+
+  void
+  set_sizeofgeneric(Named_object* sizeofgeneric) {
+    this->sizeofgeneric_ = sizeofgeneric;
+  }
+
  protected:
   int
   do_traverse(Traverse*);
@@ -2397,6 +2418,10 @@ class Call_expression : public Expression
   bool is_multi_value_arg_;
   // True if this expression has already been flattened.
   bool is_flattened_;
+  // The type of generic wildcard used at a particular call site
+  Type* wildcard_type_;
+  Named_object* sizeofgeneric_;
+  uint64_t genericed_args;
 };
 
 // A call expression to a builtin function.
@@ -2788,9 +2813,9 @@ class Index_expression : public Parser_expression
 {
  public:
   Index_expression(Expression* left, Expression* start, Expression* end,
-                   Expression* cap, Location location)
+                   Expression* cap, Named_object* sizeofgeneric, Location location)
     : Parser_expression(EXPRESSION_INDEX, location),
-      left_(left), start_(start), end_(end), cap_(cap)
+      left_(left), start_(start), end_(end), sizeofgeneric_(sizeofgeneric), cap_(cap)
   { }
 
   // Dump an index expression, i.e. an expression of the form
@@ -2817,6 +2842,7 @@ class Index_expression : public Parser_expression
 				(this->cap_ == NULL
 				 ? NULL
 				 : this->cap_->copy()),
+			        this->sizeofgeneric_,
 				this->location());
   }
 
@@ -2843,6 +2869,8 @@ class Index_expression : public Parser_expression
   // default capacity, non-NULL for indices and slices that specify the
   // capacity.
   Expression* cap_;
+  // Variable holding the size of the element
+  Named_object* sizeofgeneric_;
 };
 
 // An array index.  This is used for both indexing and slicing.
@@ -2851,9 +2879,10 @@ class Array_index_expression : public Expression
 {
  public:
   Array_index_expression(Expression* array, Expression* start,
-			 Expression* end, Expression* cap, Location location)
+			 Expression* end, Expression* cap, Named_object* sizeofgeneric, Location location)
     : Expression(EXPRESSION_ARRAY_INDEX, location),
-      array_(array), start_(start), end_(end), cap_(cap), type_(NULL),
+      array_(array), start_(start), end_(end), cap_(cap),
+      sizeofgeneric_(sizeofgeneric), type_(NULL),
       is_lvalue_(false), needs_bounds_check_(true)
   { }
 
@@ -2929,6 +2958,7 @@ class Array_index_expression : public Expression
                                                    (this->cap_ == NULL
                                                     ? NULL
                                                     : this->cap_->copy()),
+						   this->sizeofgeneric_,
                                                    this->location());
     ret->array_index_expression()->set_needs_bounds_check(this->needs_bounds_check_);
     return ret;
@@ -2970,6 +3000,8 @@ class Array_index_expression : public Expression
   bool is_lvalue_;
   // Whether bounds check is needed.
   bool needs_bounds_check_;
+  // Variable holding the size of the element
+  Named_object* sizeofgeneric_;
 };
 
 // A string index.  This is used for both indexing and slicing.

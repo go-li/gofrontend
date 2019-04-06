@@ -40,7 +40,7 @@ Gogo::import_unsafe(const std::string& local_name, bool is_local_name_exported,
   Named_object* no = package->bindings()->lookup("Pointer");
   if (no == NULL)
     {
-      Type* type = Type::make_pointer_type(Type::make_void_type());
+      Type* type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
       no = bindings->add_type("Pointer", package, type,
 			      Linemap::unknown_location());
     }

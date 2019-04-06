@@ -743,15 +743,22 @@ Import::import_func(Package* package)
   Typed_identifier_list* parameters;
   Typed_identifier_list* results;
   bool is_varargs;
+  bool is_generic;
   bool nointerface;
   std::string body;
   Function::import_func(this, &name, &receiver, &parameters, &results,
-			&is_varargs, &nointerface, &body);
+			&is_varargs, &is_generic, &nointerface, &body);
   Function_type *fntype = Type::make_function_type(receiver, parameters,
 						   results, this->location_);
   if (is_varargs)
     fntype->set_is_varargs();
 
+  if (is_generic)
+    {
+      // we set both bools just to be sure
+      fntype->set_is_macro();
+      fntype->set_parentgeneric();
+    }
   Location loc = this->location_;
   Named_object* no;
   if (fntype->is_method())

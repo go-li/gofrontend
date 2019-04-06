@@ -84,7 +84,7 @@ static Type*
 runtime_function_type(Runtime_function_type bft)
 {
   go_assert(bft < NUMBER_OF_RUNTIME_FUNCTION_TYPES);
-  Type* any = Type::make_pointer_type(Type::make_void_type());
+  Type* any = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   if (runtime_function_types[bft] == NULL)
     {
       const Location bloc = Linemap::predeclared_location();
@@ -144,11 +144,11 @@ runtime_function_type(Runtime_function_type bft)
 	  break;
 
 	case RFT_POINTER:
-	  t = Type::make_pointer_type(Type::make_void_type());
+	  t = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
 	  break;
 
 	case RFT_SLICE:
-	  t = Type::make_array_type(any, NULL);
+	  t = Type::make_array_type(Type::make_void_type(NULL, NULL), NULL);
 	  break;
 
 	case RFT_MAP:
@@ -412,7 +412,7 @@ Runtime::make_call(Runtime::Function code, Location loc,
     }
   va_end(ap);
 
-  return Expression::make_call(func, args, false, loc);
+  return Expression::actually_make_call(NULL, func, args, false, loc);
 }
 
 // Get the runtime code for a named builtin function.  This is used as a helper

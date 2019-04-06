@@ -64,7 +64,8 @@ Gogo::Gogo(Backend* backend, Linemap* linemap, int, int pointer_size)
     analysis_sets_(),
     gc_roots_(),
     imported_inlinable_functions_(),
-    imported_inline_functions_()
+    imported_inline_functions_(),
+    sizeofgeneric_(NULL)
 {
   const Location loc = Linemap::predeclared_location();
 
@@ -783,7 +784,7 @@ Gogo::register_gc_vars(const std::vector<Named_object*>& var_gc,
   if (var_gc.empty() && this->gc_roots_.empty())
     return;
 
-  Type* pvt = Type::make_pointer_type(Type::make_void_type());
+  Type* pvt = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   Type* uintptr_type = Type::lookup_integer_type("uintptr");
   Type* byte_type = this->lookup_global("byte")->type_value();
   Type* pointer_byte_type = Type::make_pointer_type(byte_type);
@@ -911,7 +912,7 @@ Gogo::initialization_function_decl()
   Location loc = this->package_->location();
 
   Function_type* fntype = Type::make_function_type(NULL, NULL, NULL, loc);
-  Function* initfn = new Function(fntype, NULL, NULL, loc);
+  Function* initfn = new Function(fntype, NULL, NULL, false, loc);
   return Named_object::make_function(name, NULL, initfn);
 }
 
@@ -1824,7 +1825,12 @@ Gogo::start_function(const std::string& name, Function_type* type,
 			 ? NULL
 			 : this->functions_.back().function);
 
-  Function* function = new Function(type, enclosing, block, location);
+  bool isparentgeneric = ((enclosing != NULL) && (enclosing->func_value() != NULL) &&
+                          (enclosing->func_value()->type() != NULL) &&
+                          (enclosing->func_value()->type()->is_macro() ||
+                           enclosing->func_value()->is_parent_generic()));
+
+  Function* function = new Function(type, enclosing, block, isparentgeneric, location);
 
   if (type->is_method())
     {
@@ -3994,7 +4000,7 @@ Shortcuts::convert_shortcut(Block* enclosing, Expression** pshortcut)
   Block* block = new Block(retblock, loc);
   block->set_end_location(loc);
   Expression* tmpref = Expression::make_temporary_reference(ts, loc);
-  Statement* assign = Statement::make_assignment(tmpref, right, loc);
+  Statement* assign = Statement::make_assignment(tmpref, right, NULL, loc);
   block->add_statement(assign);
 
   Expression* cond = Expression::make_temporary_reference(ts, loc);
@@ -4580,7 +4586,7 @@ Gogo::declare_builtin_rf_address(const char* name, bool hasarg)
     }
 
   Typed_identifier_list* return_types = new Typed_identifier_list();
-  Type* voidptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* voidptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   return_types->push_back(Typed_identifier("", voidptr_type, bloc));
 
   Function_type* fntype = Type::make_function_type(NULL, param_types,
@@ -5149,9 +5155,35 @@ Gogo::convert_named_types_in_bindings(Bindings* bindings)
     }
 }
 
+// Smuggle a Named_object argument using a Gogo argument
+
+
+Gogo*
+Gogo::smuggle(Named_object* sizeofgeneric)
+{
+  if (this != NULL) {
+    this->sizeofgeneric_ = sizeofgeneric;
+  }
+  return this;
+}
+
+// Retrieve a smuggled Named_object
+
+Named_object*
+Gogo::get_sizeofgeneric()
+{
+  if (this == NULL) {
+    return NULL;
+  }
+  Named_object* s = this->sizeofgeneric_;
+  //	this->sizeofgeneric_ = NULL;
+  return s;
+}
+
 // Class Function.
 
 Function::Function(Function_type* type, Named_object* enclosing, Block* block,
+		   bool parent_generic,
 		   Location location)
   : type_(type), enclosing_(enclosing), results_(NULL),
     closure_var_(NULL), block_(block), location_(location), labels_(),
@@ -5161,7 +5193,7 @@ Function::Function(Function_type* type, Named_object* enclosing, Block* block,
     calls_recover_(false), is_recover_thunk_(false), has_recover_thunk_(false),
     calls_defer_retaddr_(false), is_type_specific_function_(false),
     in_unique_section_(false), export_for_inlining_(false),
-    is_inline_only_(false)
+    is_inline_only_(false), parent_generic_(parent_generic)
 {
 }
 
@@ -5283,7 +5315,7 @@ Function::set_closure_type()
 
   // The first field of a closure is always a pointer to the function
   // code.
-  Type* voidptr_type = Type::make_pointer_type(Type::make_void_type());
+  Type* voidptr_type = Type::make_pointer_type(Type::make_void_type(NULL, NULL));
   st->push_field(Struct_field(Typed_identifier(".f", voidptr_type,
 					       this->location_)));
 
@@ -5533,6 +5565,13 @@ Function::export_func_with_type(Export* exp, const std::string& name,
 {
   exp->write_c_string("func ");
 
+  bool is_macro = fntype->is_macro() && fntype->is_parentgeneric();
+
+  if (is_macro)
+    {
+      exp->write_c_string("/*generic*/ ");
+    }
+
   if (nointerface)
     {
       go_assert(fntype->is_method());
@@ -5558,26 +5597,31 @@ Function::export_func_with_type(Export* exp, const std::string& name,
     {
       size_t i = 0;
       bool is_varargs = fntype->is_varargs();
+
       bool first = true;
       for (Typed_identifier_list::const_iterator p = parameters->begin();
 	   p != parameters->end();
 	   ++p, ++i)
 	{
-	  if (first)
-	    first = false;
-	  else
-	    exp->write_c_string(", ");
+	  if (!is_macro || p + (is_varargs ? 2 : 1) != parameters->end())
+	    {
+              if (first)
+                first = false;
+              else
+                exp->write_c_string(", ");
 	  exp->write_name(p->name());
 	  exp->write_escape(p->note());
 	  exp->write_c_string(" ");
-	  if (!is_varargs || p + 1 != parameters->end())
-	    exp->write_type(p->type());
-	  else
-	    {
-	      exp->write_c_string("...");
+
+              if (!is_varargs || p + 1 != parameters->end())
+                exp->write_type(p->type());
+              else
+                {
+                  exp->write_c_string("...");
 	      exp->write_type(p->type()->array_type()->element_type());
 	    }
 	}
+    }
     }
   exp->write_c_string(")");
 
@@ -5661,14 +5705,21 @@ Function::import_func(Import* imp, std::string* pname,
 		      Typed_identifier** preceiver,
 		      Typed_identifier_list** pparameters,
 		      Typed_identifier_list** presults,
-		      bool* is_varargs,
+		      bool* is_varargs, bool* is_generic,
 		      bool* nointerface,
 		      std::string* body)
 {
   imp->require_c_string("func ");
 
+  *is_generic = false;
+  if (imp->match_c_string("/*generic*/ "))
+    {
+      imp->require_c_string("/*generic*/ ");
+      *is_generic = true;
+    }
+
   *nointerface = false;
-  if (imp->match_c_string("/*"))
+  if (imp->match_c_string("/*nointerface*/ "))
     {
       imp->require_c_string("/*nointerface*/ ");
       *nointerface = true;
@@ -5710,6 +5761,15 @@ Function::import_func(Import* imp, std::string* pname,
 	    {
 	      imp->advance(3);
 	      *is_varargs = true;
+
+	      if (*is_generic)
+		{
+		  Type* dtype = Type::make_type_descriptor_ptr_type();
+		  Typed_identifier t = Typed_identifier("Sizeofgeneric", dtype, imp->location());
+		  t.set_note(Escape_note::make_tag(Node::ESCAPE_UNKNOWN));
+		  parameters->push_back(t);
+		}
+
 	    }
 
 	  Type* ptype = imp->read_type();
@@ -5725,6 +5785,16 @@ Function::import_func(Import* imp, std::string* pname,
 	}
     }
   imp->require_c_string(")");
+
+  if (*is_generic && ! *is_varargs)
+    {
+      Type* dtype = Type::make_type_descriptor_ptr_type();
+      Typed_identifier t = Typed_identifier("Sizeofgeneric", dtype, imp->location());
+      t.set_note(Escape_note::make_tag(Node::ESCAPE_UNKNOWN));
+      parameters->push_back(t);
+    }
+
+
   *pparameters = parameters;
 
   Typed_identifier_list* results;
@@ -6250,7 +6320,7 @@ Function::build_defer_wrapper(Gogo* gogo, Named_object* named_function,
   defer = call->get_backend(&context);
 
   call = Runtime::make_call(Runtime::DEFERRETURN, end_loc, 1,
-        		    this->defer_stack(end_loc));
+		            this->defer_stack(end_loc));
   Bexpression* undefer = call->get_backend(&context);
   Bstatement* function_defer =
       gogo->backend()->function_defer_statement(this->fndecl_, undefer, defer,
@@ -6894,7 +6964,7 @@ Function_declaration::import_function_body(Gogo* gogo, Named_object* no)
 
   Block* outer = new Block(NULL, start_loc);
 
-  Function* fn = new Function(fntype, NULL, outer, start_loc);
+  Function* fn = new Function(fntype, NULL, outer, false, start_loc);
   fn->set_is_inline_only();
 
   if (fntype->is_method())

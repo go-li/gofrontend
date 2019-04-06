@@ -21,6 +21,7 @@ class Typed_identifier_list;
 class Integer_type;
 class Float_type;
 class Complex_type;
+class Sink_type;
 class String_type;
 class Function_type;
 class Backend_function_type;
@@ -33,6 +34,11 @@ class Map_type;
 class Channel_type;
 class Interface_type;
 class Named_type;
+class Error_type;
+class Void_type;
+class Nil_type;
+class Boolean_type;
+class Call_multiple_result_type;
 class Forward_declaration_type;
 class Method;
 class Methods;
@@ -413,7 +419,7 @@ class Type
   make_error_type();
 
   static Type*
-  make_void_type();
+  make_void_type(Named_object*, Named_object***);
 
   // Get the unnamed bool type.
   static Type*
@@ -804,6 +810,26 @@ class Type
   function_type() const
   { return this->convert<const Function_type, TYPE_FUNCTION>(); }
 
+  // If this is a pointer type, return it.  Otherwise, return NULL.
+  Pointer_type*
+  pointer_type()
+  { return this->convert<Pointer_type, TYPE_POINTER>(); }
+
+  // If this is a error type, return it.  Otherwise, return NULL.
+  Error_type*
+  error_type()
+  { return this->convert<Error_type, TYPE_ERROR>(); }
+
+  // If this is a void type, return it.  Otherwise, return NULL.
+  Void_type*
+  void_type()
+  { return this->convert<Void_type, TYPE_VOID>(); }
+
+  // If this is a string type, return it.  Otherwise, return NULL.
+  String_type*
+  string_type()
+  { return this->convert<String_type, TYPE_STRING>(); }
+
   // If this is a pointer type, return the type to which it points.
   // Otherwise, return NULL.
   Type*
@@ -912,6 +938,16 @@ class Type
     return this->convert_no_base<const Forward_declaration_type,
 				 TYPE_FORWARD>();
   }
+
+  // If this is a boolean type, return it.  Otherwise, return NULL.
+  Boolean_type*
+  boolean_type()
+  { return this->convert<Boolean_type, TYPE_BOOLEAN>(); }
+
+  // If this is a nil type, return it.  Otherwise, return NULL.
+  Nil_type*
+  nil_type()
+  { return this->convert<Nil_type, TYPE_NIL>(); }
 
   // Return true if this type is not yet defined.
   bool
@@ -1055,10 +1091,41 @@ class Type
   static Type*
   import_type(Import*);
 
+  Type*
+  inval(Type* a, Type* b)
+  {
+    if (a->is_error_type()) {
+      return a;
+    }
+    return b;
+  }
+
+  Type*
+  check_typeconflict(Type* newt, Type* oldt, bool vararg_eface_promotion);
+
+  Type*
+  dispatch_substitute(Type* wildcard, std::map<Named_type*, Named_type*> saw);
+
+  Type*
+  dispatch_wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+
+  bool
+  dispatch_same(Type* a, std::map<Named_type*, Named_type*> saw);
+
  protected:
   Type(Type_classification);
 
   // Functions implemented by the child class.
+
+
+  virtual Type*
+  substitute(Type* wildcard, std::map<Named_type*, Named_type*> saw) = 0;
+
+  virtual Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw) = 0;
+
+  virtual bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw) = 0;
 
   // Traverse the subtypes.
   virtual int
@@ -1596,6 +1663,14 @@ class Error_type : public Type
     : Type(TYPE_ERROR)
   { }
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
  protected:
   bool
   do_compare_is_identity(Gogo*)
@@ -1619,11 +1694,26 @@ class Error_type : public Type
 class Void_type : public Type
 {
  public:
-  Void_type()
-    : Type(TYPE_VOID)
+  Void_type(Named_object* sizeofgeneric)
+    : Type(TYPE_VOID), sizeofgeneric_(sizeofgeneric)
   { }
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
+  Named_object**
+  get()
+  {
+    return &this->sizeofgeneric_;
+  }
+
  protected:
+
   bool
   do_compare_is_identity(Gogo*)
   { return false; }
@@ -1632,8 +1722,7 @@ class Void_type : public Type
   do_get_backend(Gogo* gogo);
 
   Expression*
-  do_type_descriptor(Gogo*, Named_type*)
-  { go_unreachable(); }
+  do_type_descriptor(Gogo*, Named_type*);
 
   void
   do_reflection(Gogo*, std::string*) const
@@ -1641,6 +1730,9 @@ class Void_type : public Type
 
   void
   do_mangled_name(Gogo*, std::string* ret) const;
+
+ private:
+  Named_object* sizeofgeneric_;
 };
 
 // The boolean type.
@@ -1651,6 +1743,14 @@ class Boolean_type : public Type
   Boolean_type()
     : Type(TYPE_BOOLEAN)
   { }
+
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   bool
@@ -1733,7 +1833,15 @@ class Integer_type : public Type
   set_is_rune()
   { this->is_rune_ = true; }
 
-protected:
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
+ protected:
   bool
   do_compare_is_identity(Gogo*)
   { return true; }
@@ -1809,6 +1917,14 @@ class Float_type : public Type
   // Whether this type is the same as T.
   bool
   is_identical(const Float_type* t) const;
+
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   bool
@@ -1888,6 +2004,14 @@ class Complex_type : public Type
   bool
   is_identical(const Complex_type* t) const;
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
  protected:
   bool
   do_compare_is_identity(Gogo*)
@@ -1945,6 +2069,14 @@ class String_type : public Type
     : Type(TYPE_STRING)
   { }
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
  protected:
   bool
   do_has_pointer() const
@@ -1985,8 +2117,8 @@ class Function_type : public Type
 		Typed_identifier_list* results, Location location)
     : Type(TYPE_FUNCTION),
       receiver_(receiver), parameters_(parameters), results_(results),
-      location_(location), is_varargs_(false), is_builtin_(false),
-      fnbtype_(NULL), is_tagged_(false)
+      location_(location), is_varargs_(false), is_builtin_(false), is_macro_(false),
+      fnbtype_(NULL), is_tagged_(false), is_parentgeneric_(false)
   { }
 
   // Get the receiver.
@@ -2034,6 +2166,16 @@ class Function_type : public Type
   is_builtin() const
   { return this->is_builtin_; }
 
+  // Whether this is a macro function.
+  bool
+  is_macro() const
+  { return this->is_macro_; }
+
+  // Whether this is a parentgeneric function.
+  bool
+  is_parentgeneric() const
+  { return this->is_parentgeneric_; }
+
   // The location where this type was defined.
   Location
   location() const
@@ -2063,6 +2205,16 @@ class Function_type : public Type
   void
   set_is_builtin()
   { this->is_builtin_ = true; }
+
+  // Record that this is a macro function.
+  void
+  set_is_macro()
+  { this->is_macro_ = true; }
+
+  // Record that this is a parentgeneric function.
+  void
+  set_parentgeneric()
+  { this->is_parentgeneric_ = true; }
 
   // Import a function type.
   static Function_type*
@@ -2102,6 +2254,14 @@ class Function_type : public Type
   virtual bool
   is_backend_function_type() const
   { return false; }
+
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   int
@@ -2177,12 +2337,17 @@ class Function_type : public Type
   // Whether this is a special builtin function which can not simply
   // be called.  This is used for len, cap, etc.
   bool is_builtin_;
+  // Whether this function is a macro function. A macro function
+  // has a macro receiver, macro argument, macro return value, or a macro
+  // function callback argument.
+  bool is_macro_;
   // The backend representation of this type for backend function
   // declarations and definitions.
   Btype* fnbtype_;
   // Whether this function has been analyzed by escape analysis.  If this is
   // TRUE, this function type's parameters contain a summary of the analysis.
   bool is_tagged_;
+  bool is_parentgeneric_;
 };
 
 // The type of a function's backend representation.
@@ -2228,6 +2393,14 @@ class Pointer_type : public Type
 
   static Type*
   make_pointer_type_descriptor_type();
+
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   int
@@ -2278,6 +2451,14 @@ class Nil_type : public Type
   Nil_type()
     : Type(TYPE_NIL)
   { }
+
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   bool
@@ -2592,6 +2773,14 @@ class Struct_type : public Type
   void
   write_to_c_header(std::ostream&) const;
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
  protected:
   int
   do_traverse(Traverse*);
@@ -2769,6 +2958,14 @@ class Array_type : public Type
   void
   write_equal_function(Gogo*, Named_type*);
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
  protected:
   int
   do_traverse(Traverse* traverse);
@@ -2896,6 +3093,14 @@ class Map_type : public Type
   // This must be in  sync with libgo/go/runtime/hashmap.go.
   static const int bucket_size = 8;
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
  protected:
   int
   do_traverse(Traverse*);
@@ -3014,6 +3219,14 @@ class Channel_type : public Type
 
   static Type*
   select_case_type();
+
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   int
@@ -3178,6 +3391,14 @@ class Interface_type : public Type
     if (parse_methods_ != NULL)
       parse_methods_->sort_by_name();
   }
+
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
 
  protected:
   int
@@ -3504,6 +3725,14 @@ class Named_type : public Type
   void
   convert(Gogo*);
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
+
  protected:
   int
   do_traverse(Traverse* traverse)
@@ -3664,6 +3893,13 @@ class Forward_declaration_type : public Type
   void
   add_existing_method(Named_object*);
 
+  Type*
+  substitute(Type*, std::map<Named_type*, Named_type*>);
+
+  Type*
+  wildcard(Type* a, std::map<Named_type*, Named_type*> saw);
+  bool
+  same(Type* a, std::map<Named_type*, Named_type*> saw);
  protected:
   int
   do_traverse(Traverse* traverse);
