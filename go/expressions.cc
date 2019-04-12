@@ -10123,21 +10123,28 @@ Call_expression::lower_varargs(Gogo* gogo, Named_object* function,
 	{
           Function_type* fntype = this->get_function_type();
 	  Type* element_type = varargs_type->array_type()->element_type();
+	  bool is_generic = false;
+	  std::map<Named_type*, Named_type*> sawmap;
+	  Type *wc = element_type->dispatch_wildcard(element_type, sawmap);
+	  if ((wc != NULL) && wc->is_void_type())
+	      is_generic = true;
+	  sawmap.clear();
+
 	  Expression_list* vals = new Expression_list;
 	  for (; pa != old_args->end(); ++pa, ++i)
 	    {
 	      // Check types here so that we get a better message.
 	      Type* patype = (*pa)->type();
 	      Location paloc = (*pa)->location();
-              if (!fntype->is_macro() || !fntype->is_parentgeneric() || !element_type->is_void_type() || param_count > i)
+              if (fntype->is_macro() && fntype->is_parentgeneric() && is_generic && param_count <= i)
+                {
+                  this->genericed_args |= (uint64_t)((uint64_t)1 << (uint64_t)i);
+                }
+              else
                 {
                   if (!this->check_argument_type(i, element_type, patype,
                                                  paloc, issued_error))
                      continue;
-                }
-              else
-                {
-                  this->genericed_args |= (uint64_t)((uint64_t)1 << (uint64_t)i);
                 }
 	      vals->push_back(*pa);
 	    }
