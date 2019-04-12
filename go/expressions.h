@@ -1234,6 +1234,11 @@ class Expression_list
   push_back(Expression* expr)
   { this->entries_.push_back(expr); }
 
+  // Delete an entry from the end of the list.
+  void
+  pop_back()
+  { this->entries_.pop_back(); }
+
   void
   append(Expression_list* add)
   { this->entries_.insert(this->entries_.end(), add->begin(), add->end()); }

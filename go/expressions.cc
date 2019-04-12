@@ -10121,6 +10121,7 @@ Call_expression::lower_varargs(Gogo* gogo, Named_object* function,
 	}
       else
 	{
+          Function_type* fntype = this->get_function_type();
 	  Type* element_type = varargs_type->array_type()->element_type();
 	  Expression_list* vals = new Expression_list;
 	  for (; pa != old_args->end(); ++pa, ++i)
@@ -10128,9 +10129,16 @@ Call_expression::lower_varargs(Gogo* gogo, Named_object* function,
 	      // Check types here so that we get a better message.
 	      Type* patype = (*pa)->type();
 	      Location paloc = (*pa)->location();
-	      if (!this->check_argument_type(i, element_type, patype,
-					     paloc, issued_error))
-		continue;
+              if (!fntype->is_macro() || !fntype->is_parentgeneric() || !element_type->is_void_type() || param_count > i)
+                {
+                  if (!this->check_argument_type(i, element_type, patype,
+                                                 paloc, issued_error))
+                     continue;
+                }
+              else
+                {
+                  this->genericed_args |= (uint64_t)((uint64_t)1 << (uint64_t)i);
+                }
 	      vals->push_back(*pa);
 	    }
 	  Slice_construction_expression* sce =
@@ -10220,7 +10228,7 @@ Call_expression::do_flatten(Gogo* gogo, Named_object*,
 	}
       for (; pa != this->args_->end(); ++pa, ++pp)
 	{
-	  go_assert(pp != fntype->parameters()->end());
+	  //go_assert(pp != fntype->parameters()->end());
 	  if (Type::are_identical(pp->type(), (*pa)->type(),
 				  Type::COMPARE_TAGS, NULL))
 	    args->push_back(*pa);
@@ -10497,9 +10505,34 @@ Call_expression::do_determine_type(const Type_context*)
             Type* param = (pt)->type();
 
 
+		Typed_identifier_list::const_iterator pnext = pt;
+		++pnext;
+		Expression_list::const_iterator panext = pa;
+		--panext;
+
+		if (NULL == *wildcard) {
+		if (((pnext) == parameters->end()) && fntype->is_varargs() && param->is_slice_type()) {
+
+			if (this->is_varargs()) {
+				arg = (*panext)->type();
+			} else {
+				param = param->array_type()->element_type();
+				arg = (*panext)->type();
+			}
+
+
+		}} else if (((pnext) == parameters->end()) && fntype->is_varargs()) {
+			param = NULL;
+			arg = NULL;
+		}
+
+
             //		printf("GOING TO DERIVE %p %p\n", param, arg);
 
-            Type* wcard = (param)->dispatch_wildcard(arg, saw);
+	    Type* wcard = NULL;
+
+	    if (param != NULL)
+		wcard = (param)->dispatch_wildcard(arg, saw);
 
             //		int classa = wcard == NULL ? -1 : wcard->classification();
             //		printf("DERIVED WILDCARD FOR ARG PARAM %d %d\n", i, classa);
@@ -10531,8 +10564,10 @@ Call_expression::do_determine_type(const Type_context*)
           this->report_error(_("wildcard cannot be untyped"));
         } else if (saw.find(NULL) != saw.end()) {
           this->report_error(_("not comparable wildcard map key"));
+        } else if (fntype->is_varargs()) {
+          this->genericed_args |= (uint64_t)((((uint64_t)0xffffffff) << (uint64_t)this->args_->size())>>2);
         } else {
-          this->genericed_args |= (uint64_t)((uint64_t)1 << (uint64_t)i);
+          this->genericed_args |= (uint64_t)(((uint64_t)1) << (uint64_t)i);
         }
       }
 
@@ -10541,17 +10576,43 @@ Call_expression::do_determine_type(const Type_context*)
       if ((fntype != NULL) && fntype->is_parentgeneric() && fntype->is_macro()) {
 
 	if ((wildcard != NULL) && (NULL != *wildcard)) {
+
+	Expression* foo = NULL;
+
+	if (fntype->is_varargs()) {
+
+		this->args_->pop_back();
+
+		foo = this->args_->back();
+
+		this->args_->pop_back();
+
+	}
+
           if ((*wildcard)->is_void_type()) {
             Named_object* sizeofg = this->get_sizeofgeneric(); //gogo->lookup("Sizeofgeneric", NULL);
             if (sizeofg != NULL) {
+
+
+
               Expression* mytype = Expression::make_var_reference(sizeofg, this->location());
               this->args_->push_back(mytype);
             }
           } else {
 
+
+
             Expression* type_arg = Expression::make_type_descriptor(*wildcard, this->location());
             this->args_->push_back(type_arg);
           }
+
+	if (fntype->is_varargs()) {
+
+		this->args_->push_back(foo);
+
+	}
+
+
 	} else {
           this->report_error(_("macro but no wildcard"));
 	}
