@@ -109,6 +109,9 @@ Type::check_typeconflict(Type* newt, Type* oldt, bool vararg_eface_promotion)
     return newt;
   }
 
+  newt = newt->forwarded();
+  oldt = oldt->forwarded();
+
   //	printf("Type::check_typeconflict MUST BE SAME %p %p\n", oldt, newt);
 
   std::map<Named_type*, Named_type*> saw;
@@ -5521,10 +5524,11 @@ Function_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*
 {
   bool differs = false;
 
-
   const Typed_identifier_list* params = this->parameters();
-
   Typed_identifier_list* myparams = new Typed_identifier_list();
+  if (params != NULL) {
+
+
 
   for (size_t i = 0; i < params->size(); i++) {
     const Typed_identifier& f = params->at(i);
@@ -5543,11 +5547,14 @@ Function_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*
 
 
   }
+  }
 
 
   const Typed_identifier_list* results = this->results();
-
   Typed_identifier_list* myresults = new Typed_identifier_list();
+  if (results != NULL) {
+
+
 
   for (size_t i = 0; i < results->size(); i++) {
     const Typed_identifier& f = results->at(i);
@@ -5566,7 +5573,7 @@ Function_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*
 
 
   }
-
+  }
 
   if (!differs) {
     delete myparams;
