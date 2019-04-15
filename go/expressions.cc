@@ -3442,6 +3442,19 @@ Type_conversion_expression::do_lower(Gogo*, Named_object*,
 	}
     }
 
+  // if the type we are casting to is generic type, and we are not in a generic
+  // function and this type cast is a receiver
+  // FIXME: check we are indeed in a non-generic function
+  if ((type->named_type() != NULL) && (val->type()->named_type() != NULL)) {
+      std::map<Named_type*, Named_type*> sawmap;
+      Type *wc = type->dispatch_wildcard(val->type(), sawmap);
+      if ((wc != NULL) && !wc->is_void_type() && !wc->is_error_type() && !wc->is_nil_type() && (sawmap.find(NULL) == sawmap.end())) {
+          sawmap.clear();
+          return Expression::make_unsafe_cast(type, val, location);
+      }
+      sawmap.clear();
+  }
+
   return this;
 }
 
@@ -10528,26 +10541,17 @@ Call_expression::do_determine_type(const Type_context*)
 			}
 
 
-		}} else if (((pnext) == parameters->end()) && fntype->is_varargs()) {
-			param = NULL;
-			arg = NULL;
-		}
+		}}
 
 
             //		printf("GOING TO DERIVE %p %p\n", param, arg);
 
-	    Type* wcard = NULL;
-
-	    if (param != NULL)
-		wcard = (param)->dispatch_wildcard(arg, saw);
+	    Type* wcard = (param)->dispatch_wildcard(arg, saw);
 
             //		int classa = wcard == NULL ? -1 : wcard->classification();
             //		printf("DERIVED WILDCARD FOR ARG PARAM %d %d\n", i, classa);
 
-
-            if ((wcard != NULL)) {
-              this->genericed_args |= (uint64_t)((uint64_t)1 << (uint64_t)i);
-            }
+            this->genericed_args |= (uint64_t)((uint64_t)1 << (uint64_t)i);
 
             //		int classb = (*wildcard) == NULL ? -1 : (*wildcard)->classification();
             //		printf("check_typeconflict FOR ARG PARAM %d %p %p %d %d\n", i, wcard, *wildcard, classa, classb);
@@ -10673,7 +10677,6 @@ Call_expression::check_argument_type(int i, const Type* parameter_type,
 }
 
 // Check types.
-
 void
 Call_expression::do_check_types(Gogo* gogo)
 {
@@ -10706,6 +10709,51 @@ Call_expression::do_check_types(Gogo* gogo)
       go_assert(this->args_ != NULL && !this->args_->empty());
       Type* rtype = fntype->receiver()->type();
       Expression* first_arg = this->args_->front();
+
+      if (fntype->is_macro() && fntype->is_parentgeneric()) {
+
+	std::map<Named_type*, Named_type*> sawmap;
+
+	Type* recv_arg_type = first_arg->type();
+
+	if ((rtype->named_type() != NULL) && (recv_arg_type->named_type() == NULL)) {
+	    rtype = rtype->named_type()->real_type();
+	}
+
+	recv_arg_type = recv_arg_type->deref();
+
+	if ((recv_arg_type->named_type() != NULL)) {
+	    recv_arg_type = recv_arg_type->named_type()->real_type();
+	}
+
+	Type* wcard = (rtype)->dispatch_wildcard(recv_arg_type, sawmap);
+
+	if ((wcard) == NULL) {
+            this->report_error(_("underived wildcard in receiver"));
+	    this->set_is_error();
+	    return;
+        }
+
+	bool is_unsafe_convert = false;
+	if (first_arg->unary_expression() != NULL) {
+	    is_unsafe_convert = (first_arg->unary_expression()->operand()->
+				unsafe_conversion_expression() != NULL);
+	}
+
+	if (!(wcard->is_void_type() && is_unsafe_convert))
+	    wcard = wcard->check_typeconflict(wcard, this->wildcard_type_, false);
+
+	if ((wcard) == NULL) {
+          this->report_error(_("underived wildcard in receiver"));
+        } else if ((wcard)->is_error_type()) {
+          this->report_error(_("wildcard type conflict in receiver"));
+        } else if ((wcard)->is_nil_type()) {
+          this->report_error(_("wildcard cannot be untyped in receiver"));
+        } else if (sawmap.find(NULL) != sawmap.end()) {
+          this->report_error(_("not comparable wildcard map key in receiver"));
+        }
+
+      } else {
       // We dereference the values since receivers are always passed
       // as pointers.
       std::string reason;
@@ -10722,6 +10770,7 @@ Call_expression::do_check_types(Gogo* gogo)
 	      this->set_is_error();
 	    }
 	}
+      }
     }
 
   // Note that varargs was handled by the lower_varargs() method, so
