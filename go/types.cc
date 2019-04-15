@@ -4066,7 +4066,7 @@ Boolean_type::wildcard(Type* a, std::map<Named_type*, Named_type*> saw)
 bool
 Boolean_type::same(Type* a, std::map<Named_type*, Named_type*> saw)
 {
-  go_unreachable();
+  return a->classification() == TYPE_BOOLEAN;
 }
 
 // Class Integer_type.

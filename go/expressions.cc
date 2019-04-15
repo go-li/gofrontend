@@ -10716,14 +10716,27 @@ Call_expression::do_check_types(Gogo* gogo)
 
 	Type* recv_arg_type = first_arg->type();
 
-	if ((rtype->named_type() != NULL) && (recv_arg_type->named_type() == NULL)) {
-	    rtype = rtype->named_type()->real_type();
+	bool is_unsafe_convert = false;
+	if (first_arg->unary_expression() != NULL) {
+	    is_unsafe_convert = (first_arg->unary_expression()->operand()->
+				unsafe_conversion_expression() != NULL);
+	    if (is_unsafe_convert) {
+		recv_arg_type = first_arg->unary_expression()->operand()->
+				unsafe_conversion_expression()->expr()->type();
+	    }
 	}
+	if (!is_unsafe_convert) {
 
-	recv_arg_type = recv_arg_type->deref();
+	    if (rtype->named_type() != NULL) {
+	        rtype = rtype->named_type()->real_type();
+	    }
 
-	if ((recv_arg_type->named_type() != NULL)) {
-	    recv_arg_type = recv_arg_type->named_type()->real_type();
+	    recv_arg_type = recv_arg_type->deref();
+
+	    if ((recv_arg_type->named_type() != NULL)) {
+	        recv_arg_type = recv_arg_type->named_type()->real_type();
+	    }
+
 	}
 
 	Type* wcard = (rtype)->dispatch_wildcard(recv_arg_type, sawmap);
@@ -10734,14 +10747,7 @@ Call_expression::do_check_types(Gogo* gogo)
 	    return;
         }
 
-	bool is_unsafe_convert = false;
-	if (first_arg->unary_expression() != NULL) {
-	    is_unsafe_convert = (first_arg->unary_expression()->operand()->
-				unsafe_conversion_expression() != NULL);
-	}
-
-	if (!(wcard->is_void_type() && is_unsafe_convert))
-	    wcard = wcard->check_typeconflict(wcard, this->wildcard_type_, false);
+	wcard = wcard->check_typeconflict(wcard, this->wildcard_type_, false);
 
 	if ((wcard) == NULL) {
           this->report_error(_("underived wildcard in receiver"));
