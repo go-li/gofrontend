@@ -169,7 +169,7 @@ Mark_address_taken::expression(Expression** pexpr)
         expr->slice_literal()->set_storage_does_not_escape();
     }
 
-  // Rewrite non-escaping makeslice with constant size to stack allocation.
+  // Rewrite non-escaping non generic makeslice with constant size to stack allocation.
   Slice_value_expression* sve = expr->slice_value_expression();
   if (sve != NULL)
     {
@@ -183,39 +183,27 @@ Mark_address_taken::expression(Expression** pexpr)
           Numeric_constant nccap;
           unsigned long vlen;
           unsigned long vcap;
-          if (len_arg->numeric_constant_value(&nclen)
+          Type* elmt_type = expr->type()->array_type()->element_type();
+          if ((!elmt_type->is_void_type())
+	      && len_arg->numeric_constant_value(&nclen)
               && cap_arg->numeric_constant_value(&nccap)
               && nclen.to_unsigned_long(&vlen) == Numeric_constant::NC_UL_VALID
               && nccap.to_unsigned_long(&vcap) == Numeric_constant::NC_UL_VALID)
             {
 	      // Stack allocate an array and make a slice value from it.
               Location loc = expr->location();
-              Type* elmt_type = expr->type()->array_type()->element_type();
               Expression* len_expr =
                 Expression::make_integer_ul(vcap, cap_arg->type(), loc);
               Type* array_type = Type::make_array_type(elmt_type, len_expr);
               Expression* alloc = Expression::make_allocation(array_type, loc);
               alloc->allocation_expression()->set_allocate_on_stack();
-
-              if (elmt_type->is_void_type())
-                {
-                  Expression* array = Expression::make_unary(OPERATOR_MULT, alloc, loc);
-                  Expression* zero = Expression::make_integer_ul(0, len_arg->type(), loc);
-                  Expression* slice =
-			Expression::make_array_index(array, zero, len_arg, cap_arg, gogo_->get_sizeofgeneric(), loc);
-                  *pexpr = slice;
-                }
-              else
-                {
-	          Type* ptr_type = Type::make_pointer_type(elmt_type);
-	          Expression* ptr = Expression::make_unsafe_cast(ptr_type, alloc,
-								 loc);
-	          Expression* slice = Expression::make_slice_value(expr->type(),
-								   ptr, len_arg,
-								   cap_arg, loc);
-                  *pexpr = slice;
-                }
-
+	      Type* ptr_type = Type::make_pointer_type(elmt_type);
+	      Expression* ptr = Expression::make_unsafe_cast(ptr_type, alloc,
+							     loc);
+	      Expression* slice =
+		Expression::make_slice_value(expr->type(), ptr, len_arg,
+					     cap_arg, loc);
+              *pexpr = slice;
             }
         }
     }

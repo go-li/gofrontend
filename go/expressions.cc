@@ -10727,6 +10727,8 @@ Call_expression::do_check_types(Gogo* gogo)
 	}
 	if (!is_unsafe_convert) {
 
+	    rtype = rtype->deref();
+
 	    if (rtype->named_type() != NULL) {
 	        rtype = rtype->named_type()->real_type();
 	    }
@@ -16442,6 +16444,7 @@ Interface_mtable_expression::do_get_backend(Translate_context* context)
 	m = nt->method_function(p->name(), &is_ambiguous);
       else
 	m = st->method_function(p->name(), &is_ambiguous);
+
       go_assert(m != NULL);
       Named_object* no = m->named_object();
 
