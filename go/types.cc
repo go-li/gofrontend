@@ -10464,7 +10464,8 @@ Type::make_empty_interface_type(Location location)
 Type*
 Interface_type::substitute(Type* wildcard_type, std::map<Named_type*, Named_type*> saw)
 {
-  go_unreachable();
+  go_error_at(this->location(), "cannot return this generic type from some function");
+  return this;
 }
 
 Type*
