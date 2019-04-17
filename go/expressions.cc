@@ -10087,12 +10087,22 @@ Call_expression::lower_varargs(Gogo* gogo, Named_object* function,
   go_assert(param_count > 0);
   go_assert(varargs_type->is_slice_type());
 
+  Function_type* fntype = this->get_function_type();
+
   size_t arg_count = this->args_ == NULL ? 0 : this->args_->size();
+  if (fntype->is_macro() && fntype->is_parentgeneric()) {
+  if (1 + arg_count < param_count - 1)
+    {
+      // Not enough arguments; will be caught in check_types.
+      return;
+    }
+  } else {
   if (arg_count < param_count - 1)
     {
       // Not enough arguments; will be caught in check_types.
       return;
     }
+  }
 
   Expression_list* old_args = this->args_;
   Expression_list* new_args = new Expression_list();
@@ -10106,6 +10116,11 @@ Call_expression::lower_varargs(Gogo* gogo, Named_object* function,
     {
       Expression_list::const_iterator pa;
       int i = 1;
+      // last was bogus if generic ("Sizeofgeneric")
+      if (fntype->is_macro() && fntype->is_parentgeneric()) {
+	  i = 2;
+      }
+
       for (pa = old_args->begin(); pa != old_args->end(); ++pa, ++i)
 	{
 	  if (static_cast<size_t>(i) == param_count)
@@ -10134,14 +10149,22 @@ Call_expression::lower_varargs(Gogo* gogo, Named_object* function,
 	}
       else
 	{
-          Function_type* fntype = this->get_function_type();
 	  Type* element_type = varargs_type->array_type()->element_type();
 	  bool is_generic = false;
-	  std::map<Named_type*, Named_type*> sawmap;
-	  Type *wc = element_type->dispatch_wildcard(element_type, sawmap);
-	  if ((wc != NULL) && wc->is_void_type())
-	      is_generic = true;
-	  sawmap.clear();
+	  Type *wc = NULL;
+	  if (pa != old_args->end() && fntype->is_macro() && fntype->is_parentgeneric()) {
+	      std::map<Named_type*, Named_type*> sawmap;
+	      wc = element_type->dispatch_wildcard(element_type, sawmap);
+	      sawmap.clear();
+	      if ((wc != NULL) && (wc->is_void_type())) {
+	          is_generic = true;
+	          wc = element_type->dispatch_wildcard((*pa)->type(), sawmap);
+	          sawmap.clear();
+		  varargs_type = varargs_type->dispatch_substitute(wc, sawmap);
+	          sawmap.clear();
+
+	      }
+	  }
 
 	  Expression_list* vals = new Expression_list;
 	  for (; pa != old_args->end(); ++pa, ++i)
@@ -10527,12 +10550,10 @@ Call_expression::do_determine_type(const Type_context*)
 
 		Typed_identifier_list::const_iterator pnext = pt;
 		++pnext;
-		Expression_list::const_iterator panext = pa;
-		--panext;
 
-		if (NULL == *wildcard) {
 		if (((pnext) == parameters->end()) && fntype->is_varargs() && param->is_slice_type()) {
-
+			Expression_list::const_iterator panext = pa;
+			--panext;
 			if (this->is_varargs()) {
 				arg = (*panext)->type();
 			} else {
@@ -10541,7 +10562,7 @@ Call_expression::do_determine_type(const Type_context*)
 			}
 
 
-		}}
+		}
 
 
             //		printf("GOING TO DERIVE %p %p\n", param, arg);
@@ -10555,7 +10576,7 @@ Call_expression::do_determine_type(const Type_context*)
 
             //		int classb = (*wildcard) == NULL ? -1 : (*wildcard)->classification();
             //		printf("check_typeconflict FOR ARG PARAM %d %p %p %d %d\n", i, wcard, *wildcard, classa, classb);
-            wcard = wcard->check_typeconflict(wcard, *wildcard, false);
+            wcard = wcard->check_typeconflict(wcard, *wildcard, fntype->is_varargs());
             //		printf("checked_typeconflict FOR ARG PARAM %d %p\n", i, wcard);
             *wildcard = wcard;
 
@@ -10591,12 +10612,13 @@ Call_expression::do_determine_type(const Type_context*)
 	Expression* foo = NULL;
 
 	if (fntype->is_varargs()) {
-
-		this->args_->pop_back();
-
-		foo = this->args_->back();
-
-		this->args_->pop_back();
+		if (this->is_varargs()) {
+			foo = this->args_->back();
+			this->args_->pop_back();
+		} else {
+			foo = this->args_->back();
+			this->args_->pop_back();
+		}
 
 	}
 
@@ -10618,9 +10640,11 @@ Call_expression::do_determine_type(const Type_context*)
           }
 
 	if (fntype->is_varargs()) {
-
-		this->args_->push_back(foo);
-
+		if (this->is_varargs()) {
+			this->args_->push_back(foo);
+		} else {
+			this->args_->push_back(foo);
+		}
 	}
 
 
@@ -10709,10 +10733,18 @@ Call_expression::do_check_types(Gogo* gogo)
       go_assert(this->args_ != NULL && !this->args_->empty());
       Type* rtype = fntype->receiver()->type();
       Expression* first_arg = this->args_->front();
+      std::map<Named_type*, Named_type*> sawmap;
 
-      if (fntype->is_macro() && fntype->is_parentgeneric()) {
+      bool is_generic = false;
+      if (fntype->is_macro() && fntype->is_parentgeneric())
+        {
+          Type *wc = rtype->dispatch_wildcard(rtype, sawmap);
+          if ((wc != NULL) && wc->is_void_type())
+              is_generic = true;
+          sawmap.clear();
+        }
 
-	std::map<Named_type*, Named_type*> sawmap;
+      if (fntype->is_macro() && fntype->is_parentgeneric() && is_generic) {
 
 	Type* recv_arg_type = first_arg->type();
 
