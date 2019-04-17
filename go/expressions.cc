@@ -10612,14 +10612,8 @@ Call_expression::do_determine_type(const Type_context*)
 	Expression* foo = NULL;
 
 	if (fntype->is_varargs()) {
-		if (this->is_varargs()) {
-			foo = this->args_->back();
-			this->args_->pop_back();
-		} else {
-			foo = this->args_->back();
-			this->args_->pop_back();
-		}
-
+		foo = this->args_->back();
+		this->args_->pop_back();
 	}
 
           if ((*wildcard)->is_void_type()) {
@@ -10640,11 +10634,7 @@ Call_expression::do_determine_type(const Type_context*)
           }
 
 	if (fntype->is_varargs()) {
-		if (this->is_varargs()) {
-			this->args_->push_back(foo);
-		} else {
-			this->args_->push_back(foo);
-		}
+		this->args_->push_back(foo);
 	}
 
 
